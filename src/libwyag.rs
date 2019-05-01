@@ -168,6 +168,22 @@ pub fn cat_file<P: AsRef<Path>>(current_directory: P, fmt: &str, sha: &Sha1) -> 
     Ok(git_object.get_data())
 }
 
+//////////// hash-object //////////////
+
+pub fn hash_object<P: AsRef<Path>>(file_path: P, fmt: &str, actually_write: bool) -> Result<Sha1> {
+    let repository = repo_find_required(&file_path)?;
+    let mut file = fs::File::open(&file_path)?;
+    let mut data: Vec<u8> = Vec::new();
+    file.read_to_end(&mut data)?;
+
+    if fmt.as_bytes() == GitObject::BLOB_FMT {
+        let object = GitObject::new_blob(&repository, data);
+        object_write(&object, actually_write)
+    } else {
+        Err(Error::new(ErrorKind::InvalidData, "TODO"))
+    }
+}
+
 //////////// read/write //////////////
 
 fn object_find<'a>(repo: &GitRepository, sha: &'a Sha1, fmt: Option<&str>) -> &'a Sha1 {
