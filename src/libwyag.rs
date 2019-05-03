@@ -3,6 +3,7 @@ use std::{
     io::{prelude::*, Error, ErrorKind},
     path::{Path, PathBuf},
     result::Result::Err,
+    collections::BTreeMap,
 };
 use flate2::{
     Compression,
@@ -197,29 +198,26 @@ fn object_read<'a>(repo: &'a GitRepository, sha: &Sha1) -> Result<GitObject<'a>>
     let mut contents = Vec::new();
     zlib_decoder.read_to_end(&mut contents)?;
 
-    let space_position = contents.iter().position(|b| b == &b" "[0]);
-    match space_position {
-        None => Err(Error::new(ErrorKind::InvalidData, "TODO")),
-        Some(sp) => {
+    let space_position = contents.iter().position(|b| *b == b' ');
+    let null_position = contents.iter().position(|b| *b == b'\x00');
+
+    match (space_position, null_position) {
+        (None, _) => Err(Error::new(ErrorKind::InvalidData, "TODO")),
+        (_, None) => Err(Error::new(ErrorKind::InvalidData, "TODO")),
+        (Some(sp), Some(np)) if np < sp => Err(Error::new(ErrorKind::InvalidData, "TODO")),
+        (Some(sp), Some(np)) => {
             let fmt = &contents[0..sp];
-            let null_position = contents.iter().position(|b| b == &b"\x00"[0]);
-            match null_position {
-                None => Err(Error::new(ErrorKind::InvalidData, "TODO")),
-                Some(np) if np < sp => Err(Error::new(ErrorKind::InvalidData, "TODO")),
-                Some(np) => {
-                    let size: usize = std::str::from_utf8(&contents[sp+1..np])
-                        .map_err(|_| Error::new(ErrorKind::InvalidData, "TODO"))?
-                        .parse()
-                        .map_err(|_| Error::new(ErrorKind::InvalidData, "TODO"))?;
-                    if size != contents.len() - np - 1 {
-                        Err(Error::new(ErrorKind::InvalidData, "TODO"))
-                    } else {
-                        if fmt == GitObject::BLOB_FMT {
-                            Ok(GitObject::new_blob(repo, contents[np+1..].to_vec()))
-                        } else {
-                            Err(Error::new(ErrorKind::InvalidData, "TODO"))
-                        }
-                    }
+            let size: usize = std::str::from_utf8(&contents[sp+1..np])
+                .map_err(|_| Error::new(ErrorKind::InvalidData, "TODO"))?
+                .parse()
+                .map_err(|_| Error::new(ErrorKind::InvalidData, "TODO"))?;
+            if size != contents.len() - np - 1 {
+                Err(Error::new(ErrorKind::InvalidData, "TODO"))
+            } else {
+                if fmt == GitObject::BLOB_FMT {
+                    Ok(GitObject::new_blob(repo, contents[np+1..].to_vec()))
+                } else {
+                    Err(Error::new(ErrorKind::InvalidData, "TODO other fmt"))
                 }
             }
         }
@@ -269,6 +267,73 @@ fn test_blob_write_read() -> Result<()> {
         Blob{repository: _, data} => assert_eq!(b"100".to_vec(), data)
     }
     Ok(())
+}
+
+//////////// parse key-value list with message //////////////
+
+fn parse_kvlm(raw: &[u8], dict: &mut BTreeMap<&str, Vec<u8>>) -> Result<()> {
+    let space_position = raw.iter().position(|b| *b == b' ');
+    let newline_position = raw.iter().position(|b| *b == b'\n');
+
+    match (space_position, newline_position) {
+        (None, Some(np)) if np == 0 => {
+            dict.insert("", raw[1..].to_vec());
+            Ok(())
+        }
+        (Some(sp), Some(np)) if np < sp => {
+            dict.insert("", raw[1..].to_vec());
+            Ok(())
+        }
+        (Some(sp), Some(np)) => {
+            let key = &raw[0..sp];
+            let value = parse_value(&raw[sp+1..]);
+            // TODO
+            Ok(())
+        }
+        _ => Err(Error::new(ErrorKind::InvalidData, "TODO: Is this an error??"))
+    }
+}
+
+fn parse_value(raw: &[u8]) -> &[u8] {
+    let mut iterator = raw.iter();
+    while let Some(np) = iterator.position(|b| *b == b'\n') {
+        if raw.len() <= np || raw[np] != b' ' {
+            return &raw[..np];
+        }
+    }
+    raw
+}
+
+fn replace<T>(source: &[T], from: &[T], to: &[T]) -> Vec<T>
+where
+    T: Clone + PartialEq
+{
+    let mut result = source.to_vec();
+    let from_len = from.len();
+    let to_len = to.len();
+
+    let mut i = 0;
+    while i + from_len <= result.len() {
+        if result[i..].starts_with(from) {
+            result.splice(i..i + from_len, to.iter().cloned());
+            i += to_len;
+        } else {
+            i += 1;
+        }
+    }
+
+    result
+}
+
+#[test]
+fn test_replace() {
+    assert_eq!(b"efcd".to_vec(), replace(b"abcd", b"ab", b"ef"));
+    assert_eq!(b"afcf".to_vec(), replace(b"abcb", b"b", b"f"));
+    assert_eq!(b"ajjjbe".to_vec(), replace(b"abbbe", b"bb", b"jjj"));
+    assert_eq!(b"abjjj".to_vec(), replace(b"abc", b"c", b"jjj"));
+    assert_eq!(b"ahhe".to_vec(), replace(b"abbbbe", b"bb", b"h"));
+    assert_eq!(vec![Some(0), Some(1), Some(3), Some(4)],
+               replace(&[None, Some(3), Some(4)], &[None], &[Some(0), Some(1)]));
 }
 
 //////////// utility functions //////////////
