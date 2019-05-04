@@ -52,7 +52,7 @@ fn main() -> Result<(), std::io::Error> {
     match opt {
         Init{path} => {
             println!("Creating repository at {:?}", path);
-            libwyag::repo_create(&path)?;
+            libwyag::create_repository(&path)?;
             println!("Done!");
             Ok(())
         },
