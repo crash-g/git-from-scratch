@@ -4,7 +4,7 @@ use std::{
     io::{prelude::*, Error, ErrorKind},
     path::{Path, PathBuf},
     result::Result::Err,
-    collections::BTreeMap,
+    collections::HashSet,
 };
 use flate2::{
     Compression,
@@ -12,8 +12,8 @@ use flate2::{
     write::{ZlibEncoder},
 };
 
+use linked_hash_map::LinkedHashMap;
 use ini::Ini;
-use either::Either;
 
 type Result<T> = std::result::Result<T, Error>;
 pub type Sha1 = String;
@@ -33,6 +33,10 @@ pub enum GitObject<'a> {
     Blob {
         repository: &'a GitRepository,
         data: Vec<u8>,
+    },
+    Commit {
+        repository: &'a GitRepository,
+        data: LinkedHashMap<String, Vec<Vec<u8>>>,
     }
 }
 
@@ -70,15 +74,23 @@ impl GitRepository {
 
 impl<'a> GitObject<'a> {
     const BLOB_FMT: &'static [u8] = b"blob";
+    const COMMIT_FMT: &'static [u8] = b"commit";
 
     fn new_blob(repository: &GitRepository, data: Vec<u8>) -> GitObject {
         GitObject::Blob{repository, data}
+    }
+
+    fn new_commit(repository: &'a GitRepository, data: &[u8]) -> Result<GitObject<'a>> {
+        let mut dict = LinkedHashMap::new();
+        parse_kvlm(&data, &mut dict)?;
+        Ok(GitObject::Commit{repository, data: dict})
     }
 
     fn serialize(&self) -> Vec<u8> {
         use GitObject::*;
         match self {
             Blob{repository: _, data} => data.to_vec(),
+            Commit{repository: _, data} => serialize_kvlm(&data),
         }
     }
 
@@ -86,6 +98,7 @@ impl<'a> GitObject<'a> {
         use GitObject::*;
         match self {
             Blob{..} => GitObject::BLOB_FMT,
+            Commit{..} => GitObject::COMMIT_FMT,
         }
     }
 
@@ -93,13 +106,7 @@ impl<'a> GitObject<'a> {
         use GitObject::*;
         match self {
             Blob{repository, data: _} => repository,
-        }
-    }
-
-    fn get_data(&self) -> Either<Vec<u8>, String> {
-        use GitObject::*;
-        match self {
-            Blob{repository: _, data} => Either::Left(data.clone()),
+            Commit{repository, data: _} => repository,
         }
     }
 }
@@ -156,11 +163,11 @@ fn repo_default_config() -> Ini {
 
 //////////// cat-file //////////////
 
-pub fn cat_file<P: AsRef<Path>>(current_directory: P, fmt: &str, sha: &Sha1) -> Result<Either<Vec<u8>,String>> {
+pub fn cat_file<P: AsRef<Path>>(current_directory: P, fmt: &str, sha: &Sha1) -> Result<Vec<u8>> {
     let repository = find_repository_required(current_directory)?;
     let sha = find_object(&repository, sha, Some(fmt));
     let git_object = read_object(&repository, sha)?;
-    Ok(git_object.get_data())
+    Ok(git_object.serialize())
 }
 
 //////////// hash-object //////////////
@@ -171,8 +178,51 @@ pub fn hash_object<P: AsRef<Path>>(file_path: P, fmt: &str, actually_write: bool
         let data = read_file_content(&repository, file_path)?;
         let object = GitObject::new_blob(&repository, data);
         object_write(&object, actually_write)
+    } else if fmt.as_bytes() == GitObject::COMMIT_FMT {
+        let repository = find_repository_required(&file_path)?;
+        let data = read_file_content(&repository, file_path)?;
+        let object = GitObject::new_commit(&repository, &data)?;
+        object_write(&object, actually_write)
     } else {
         Err(Error::new(ErrorKind::InvalidData, format!("Object format {} not supported", fmt)))
+    }
+}
+
+//////////// log //////////////
+
+pub fn log<P: AsRef<Path>>(file_path: P, sha: &Sha1) -> Result<String> {
+    let repository = find_repository_required(&file_path)?;
+    let mut result = "digraph wyaglog{".to_string();
+    let mut seen = HashSet::new();
+    result += &make_graphviz_string(&repository, sha, &mut seen)?;
+    result += "}";
+    Ok(result)
+}
+
+fn make_graphviz_string(repository: &GitRepository, sha: &Sha1, seen: &mut HashSet<Sha1>) -> Result<String> {
+    if !seen.insert(sha.to_string()) {
+        return Ok("".to_string());
+    }
+
+    let commit = read_object(repository, sha)?;
+    match commit {
+        GitObject::Commit{repository, data} => {
+            match data.get("parent") {
+                None => Ok("".to_string()),
+                Some(parents) => {
+                    let mut result = String::new();
+                    for p in parents {
+                        let p = std::str::from_utf8(p)
+                            .map_err(|_| Error::new(ErrorKind::InvalidData, "Parent must be valid UTF-8"))?
+                            .to_string();
+                        result += &format!("c_{} -> c_{};", sha, p);
+                        result += &make_graphviz_string(repository, &p, seen)?;
+                    }
+                    Ok(result)
+                }
+            }
+        },
+        _ => Err(Error::new(ErrorKind::InvalidData, format!("The hash {} is not relative to a commit", sha)))
     }
 }
 
@@ -205,6 +255,10 @@ fn read_object<'a>(repository: &'a GitRepository, sha: &Sha1) -> Result<GitObjec
             } else {
                 if fmt == GitObject::BLOB_FMT {
                     Ok(GitObject::new_blob(repository, contents[np+1..].to_vec()))
+                } else if fmt == GitObject::COMMIT_FMT {
+                    let commit = GitObject::new_commit(repository, &contents[np+1..])
+                        .map_err(|e| Error::new(e.kind(), format!("The commit object is not valid: {}", e)))?;
+                    Ok(commit)
                 } else {
                     Err(Error::new(ErrorKind::InvalidData, format!("Object format {:?} not supported", fmt)))
                 }
@@ -250,18 +304,17 @@ fn test_blob_write_read() -> Result<()> {
 
     use GitObject::*;
     match git_object {
-        Blob{repository: _, data} => assert_eq!(b"100".to_vec(), data)
+        Blob{repository: _, data} => assert_eq!(b"100".to_vec(), data),
+        _ => assert!(false)
     }
     Ok(())
 }
 
 //////////// key-value list with message //////////////
 
-fn parse_kvlm(raw: &[u8], dict: &mut BTreeMap<String, Vec<Vec<u8>>>) -> Result<()> {
+fn parse_kvlm(raw: &[u8], dict: &mut LinkedHashMap<String, Vec<Vec<u8>>>) -> Result<()> {
     let space_position = raw.iter().position(|b| *b == b' ');
     let newline_position = raw.iter().position(|b| *b == b'\n');
-
-    println!("raw: {:?}", std::str::from_utf8(raw));
 
     match (space_position, newline_position) {
         (_, Some(np)) if np == 0 => {
@@ -302,7 +355,7 @@ committer another
 
 Create first draft";
 
-    let mut dict = BTreeMap::new();
+    let mut dict = LinkedHashMap::new();
     parse_kvlm(raw, &mut dict).unwrap();
     assert_eq!("29ff16c9c14e2652b22f8b78bb08a5a07930c147",
                std::str::from_utf8(&dict.get("tree").unwrap()[0]).unwrap());
@@ -319,16 +372,16 @@ Create first draft";
     assert_eq!("Create first draft", std::str::from_utf8(&dict.get("").unwrap()[0]).unwrap());
 
     let raw = b"\n";
-    let mut dict = BTreeMap::new();
+    let mut dict = LinkedHashMap::new();
     parse_kvlm(raw, &mut dict).unwrap();
     assert_eq!("", std::str::from_utf8(&dict.get("").unwrap()[0]).unwrap());
 
     let raw = b"";
-    let mut dict = BTreeMap::new();
+    let mut dict = LinkedHashMap::new();
     assert!(parse_kvlm(raw, &mut dict).is_err());
 }
 
-fn serialize_kvlm(dict: &BTreeMap<String, Vec<Vec<u8>>>) -> Result<Vec<u8>> {
+fn serialize_kvlm(dict: &LinkedHashMap<String, Vec<Vec<u8>>>) -> Vec<u8> {
     let mut result = Vec::new();
 
     for key in dict.keys() {
@@ -342,36 +395,29 @@ fn serialize_kvlm(dict: &BTreeMap<String, Vec<Vec<u8>>>) -> Result<Vec<u8>> {
             result.push(b'\n');
         }
     }
-    if let Some(message) = dict.get("") {
-        if message.len() != 1 {
-            return Err(Error::new(ErrorKind::InvalidInput, "There must be exactly one message"));
-        }
-        let message = &message[0];
-        result.push(b'\n');
-        result.append(&mut message.clone());
-    } else {
-        return Err(Error::new(ErrorKind::InvalidInput, "Message missing"));
-    }
-
-    Ok(result)
+    let message = dict.get("").expect("Message not found");
+    assert_eq!(1, message.len(), "There must be exactly one message");
+    let message = &message[0];
+    result.push(b'\n');
+    result.append(&mut message.clone());
+    result
 }
 
-// TODO replace BTreeMap with structures that preserves insertion order, then refactor this test
 #[test]
 fn test_parse_and_serialize_kvlm() {
-    let raw = b"author Thibault Polge <thibault@thb.lt> 1527025023 +0200
+    let raw = b"tree 29ff16c9c14e2652b22f8b78bb08a5a07930c147
+parent 206941306e8a8af65b66eaaaea388a7ae24d49a0
+author Thibault Polge <thibault@thb.lt> 1527025023 +0200
 committer Thibault Polge <thibault@thb.lt> 1527025044 +0200
 committer another
 gpgsig -----BEGIN PGP SIGNATURE-----
  -----END PGP SIGNATURE-----
-parent 206941306e8a8af65b66eaaaea388a7ae24d49a0
-tree 29ff16c9c14e2652b22f8b78bb08a5a07930c147
 
 Create first draft";
 
-    let mut dict = BTreeMap::new();
+    let mut dict = LinkedHashMap::new();
     parse_kvlm(raw, &mut dict).unwrap();
-    let serialized_raw = serialize_kvlm(&dict).unwrap();
+    let serialized_raw = serialize_kvlm(&dict);
     assert_eq!(std::str::from_utf8(raw).unwrap(), std::str::from_utf8(&serialized_raw).unwrap());
 }
 

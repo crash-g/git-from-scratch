@@ -1,6 +1,5 @@
 use structopt::StructOpt;
 use std::path::PathBuf;
-use either::Either;
 
 mod libwyag;
 
@@ -40,6 +39,13 @@ enum Command {
         actually_write: bool,
     },
 
+    #[structopt(name = "log")]
+    /// Log history
+    Log {
+        /// The hash of the commit to start at
+        commit: Option<libwyag::Sha1>,
+    },
+
     #[structopt(name = "add")]
     /// Add files
     Add,
@@ -60,9 +66,10 @@ fn main() -> Result<(), std::io::Error> {
             println!("cat-file {}", &hash);
             let current_directory = std::env::current_dir()?;
             let object = libwyag::cat_file(&current_directory, &fmt, &hash)?;
-            match object {
-                Either::Left(vec) => println!("Byte blob: {:?}", vec),
-                Either::Right(s) => println!("Object: {}", s)
+            if let Ok(object_as_string) = std::str::from_utf8(&object) {
+                println!("Object: {}", object_as_string);
+            } else {
+                println!("Byte blob: {:?}", object);
             }
             Ok(())
         },
@@ -70,6 +77,16 @@ fn main() -> Result<(), std::io::Error> {
             println!("hash-object {:?}", file_path);
             let sha = libwyag::hash_object(file_path, &fmt, actually_write)?;
             println!("Calculated hash is {}", sha);
+            Ok(())
+        },
+        Log{commit} => {
+            println!("log {:?}", commit);
+            if let Some(c) = commit {
+                let current_directory = std::env::current_dir()?;
+                println!("{}", libwyag::log(current_directory, &c)?);
+            } else {
+                println!("The commit hash is required at the moment...");
+            }
             Ok(())
         },
         Add => {
