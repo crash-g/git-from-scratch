@@ -255,39 +255,136 @@ fn test_blob_write_read() -> Result<()> {
     Ok(())
 }
 
-//////////// parse key-value list with message //////////////
+//////////// key-value list with message //////////////
 
-fn parse_kvlm(raw: &[u8], dict: &mut BTreeMap<&str, Vec<u8>>) -> Result<()> {
+fn parse_kvlm(raw: &[u8], dict: &mut BTreeMap<String, Vec<Vec<u8>>>) -> Result<()> {
     let space_position = raw.iter().position(|b| *b == b' ');
     let newline_position = raw.iter().position(|b| *b == b'\n');
 
+    println!("raw: {:?}", std::str::from_utf8(raw));
+
     match (space_position, newline_position) {
-        (None, Some(np)) if np == 0 => {
-            dict.insert("", raw[1..].to_vec());
+        (_, Some(np)) if np == 0 => {
+            // parse message
+            dict.insert("".to_string(), vec![raw[np + 1..].to_vec()]);
             Ok(())
         }
-        (Some(sp), Some(np)) if np < sp => {
-            dict.insert("", raw[1..].to_vec());
-            Ok(())
+        (Some(sp), Some(_np)) => {
+            let key = std::str::from_utf8(&raw[0..sp])
+                .map_err(|_| Error::new(ErrorKind::InvalidData, "Keys must be valid UTF-8"))?;
+            let (value, value_end) = parse_value(&raw[sp + 1..]);
+            let value = replace(value, b"\n ", b"\n");
+            match dict.get_mut(key) {
+                None => {
+                    dict.insert(key.to_string(), vec![value]);
+                }
+                Some(values) => {
+                    values.push(value);
+                }
+            }
+            let next_token_start = sp + value_end + 1;
+            debug_assert!(next_token_start <= raw.len());
+            parse_kvlm(&raw[next_token_start..], dict)
         }
-        (Some(sp), Some(np)) => {
-            let key = &raw[0..sp];
-            let value = parse_value(&raw[sp+1..]);
-            // TODO
-            Ok(())
-        }
-        _ => Err(Error::new(ErrorKind::InvalidData, "TODO: Is this an error??"))
+        _ => Err(Error::new(ErrorKind::InvalidData, "The key-value list file has an incorrect structure")),
     }
 }
 
-fn parse_value(raw: &[u8]) -> &[u8] {
-    let mut iterator = raw.iter();
-    while let Some(np) = iterator.position(|b| *b == b'\n') {
-        if raw.len() <= np || raw[np] != b' ' {
-            return &raw[..np];
+#[test]
+fn test_parse_kvlm() {
+    let raw = b"tree 29ff16c9c14e2652b22f8b78bb08a5a07930c147
+parent 206941306e8a8af65b66eaaaea388a7ae24d49a0
+author Thibault Polge <thibault@thb.lt> 1527025023 +0200
+committer Thibault Polge <thibault@thb.lt> 1527025044 +0200
+gpgsig -----BEGIN PGP SIGNATURE-----
+ -----END PGP SIGNATURE-----
+committer another
+
+Create first draft";
+
+    let mut dict = BTreeMap::new();
+    parse_kvlm(raw, &mut dict).unwrap();
+    assert_eq!("29ff16c9c14e2652b22f8b78bb08a5a07930c147",
+               std::str::from_utf8(&dict.get("tree").unwrap()[0]).unwrap());
+    assert_eq!("206941306e8a8af65b66eaaaea388a7ae24d49a0",
+               std::str::from_utf8(&dict.get("parent").unwrap()[0]).unwrap());
+    assert_eq!("Thibault Polge <thibault@thb.lt> 1527025023 +0200",
+               std::str::from_utf8(&dict.get("author").unwrap()[0]).unwrap());
+    assert_eq!("Thibault Polge <thibault@thb.lt> 1527025044 +0200",
+               std::str::from_utf8(&dict.get("committer").unwrap()[0]).unwrap());
+    assert_eq!("another",
+               std::str::from_utf8(&dict.get("committer").unwrap()[1]).unwrap());
+    assert_eq!("-----BEGIN PGP SIGNATURE-----\n-----END PGP SIGNATURE-----",
+               std::str::from_utf8(&dict.get("gpgsig").unwrap()[0]).unwrap());
+    assert_eq!("Create first draft", std::str::from_utf8(&dict.get("").unwrap()[0]).unwrap());
+
+    let raw = b"\n";
+    let mut dict = BTreeMap::new();
+    parse_kvlm(raw, &mut dict).unwrap();
+    assert_eq!("", std::str::from_utf8(&dict.get("").unwrap()[0]).unwrap());
+
+    let raw = b"";
+    let mut dict = BTreeMap::new();
+    assert!(parse_kvlm(raw, &mut dict).is_err());
+}
+
+fn serialize_kvlm(dict: &BTreeMap<String, Vec<Vec<u8>>>) -> Result<Vec<u8>> {
+    let mut result = Vec::new();
+
+    for key in dict.keys() {
+        if key == "" {
+            continue
+        }
+        for value in dict.get(key).unwrap() {
+            result.append(&mut key.as_bytes().to_vec());
+            result.push(b' ');
+            result.append(&mut replace(value, b"\n", b"\n "));
+            result.push(b'\n');
         }
     }
-    raw
+    if let Some(message) = dict.get("") {
+        if message.len() != 1 {
+            return Err(Error::new(ErrorKind::InvalidInput, "There must be exactly one message"));
+        }
+        let message = &message[0];
+        result.push(b'\n');
+        result.append(&mut message.clone());
+    } else {
+        return Err(Error::new(ErrorKind::InvalidInput, "Message missing"));
+    }
+
+    Ok(result)
+}
+
+// TODO replace BTreeMap with structures that preserves insertion order, then refactor this test
+#[test]
+fn test_parse_and_serialize_kvlm() {
+    let raw = b"author Thibault Polge <thibault@thb.lt> 1527025023 +0200
+committer Thibault Polge <thibault@thb.lt> 1527025044 +0200
+committer another
+gpgsig -----BEGIN PGP SIGNATURE-----
+ -----END PGP SIGNATURE-----
+parent 206941306e8a8af65b66eaaaea388a7ae24d49a0
+tree 29ff16c9c14e2652b22f8b78bb08a5a07930c147
+
+Create first draft";
+
+    let mut dict = BTreeMap::new();
+    parse_kvlm(raw, &mut dict).unwrap();
+    let serialized_raw = serialize_kvlm(&dict).unwrap();
+    assert_eq!(std::str::from_utf8(raw).unwrap(), std::str::from_utf8(&serialized_raw).unwrap());
+}
+
+fn parse_value(raw: &[u8]) -> (&[u8], usize) {
+    let mut to_skip = 0;
+    while let Some(np) = raw.iter().skip(to_skip).position(|b| *b == b'\n') {
+        let np = np + to_skip;
+        if np == raw.len() - 1 || raw[np + 1] != b' ' {
+            return (&raw[..np], np + 1);
+        }
+        to_skip = np + 1;
+    }
+    (raw, raw.len())
 }
 
 fn replace<T>(source: &[T], from: &[T], to: &[T]) -> Vec<T>
