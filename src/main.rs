@@ -2,6 +2,7 @@ use structopt::StructOpt;
 use std::path::PathBuf;
 
 mod libwyag;
+use libwyag::Result;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "git-from-scratch", about = "The stupid content tracker.")]
@@ -25,7 +26,6 @@ enum Command {
     #[structopt(name = "hash-object")]
     /// Compute object ID and optionally create a blob from a file
     HashObject {
-
         #[structopt(parse(from_os_str))]
         /// The file to read
         file_path: PathBuf,
@@ -57,57 +57,69 @@ enum Command {
     Add,
 }
 
-fn main() -> Result<(), String> {
+fn main() -> Result<()> {
     let opt = Command::from_args();
     println!("{:?}", opt);
     use Command::*;
     match opt {
-        Init{path} => {
-            println!("Creating repository at {:?}", path);
-            libwyag::create_repository(&path)?;
-            println!("Done!");
-            Ok(())
-        },
-        CatFile{fmt,hash} => {
-            println!("cat-file {}", &hash);
-            let current_directory = std::env::current_dir()
-                .map_err(|_| "Cannot determine current directory".to_string())?;
-            let object = libwyag::cat_file(&current_directory, &fmt, &hash)?;
-            if let Ok(object_as_string) = std::str::from_utf8(&object) {
-                println!("Object: {}", object_as_string);
-            } else {
-                println!("Byte blob: {:?}", object);
-            }
-            Ok(())
-        },
-        HashObject{file_path, fmt, actually_write} => {
-            println!("hash-object {:?}", file_path);
-            let sha = libwyag::hash_object(file_path, &fmt, actually_write)?;
-            println!("Calculated hash is {}", sha);
-            Ok(())
-        },
-        Log{commit} => {
-            println!("log {:?}", commit);
-            if let Some(c) = commit {
-                let current_directory = std::env::current_dir()
-                    .map_err(|_| "Cannot determine current directory".to_string())?;
-                println!("{}", libwyag::log(current_directory, &c)?);
-            } else {
-                println!("The commit hash is required at the moment...");
-            }
-            Ok(())
-        },
-        LsTree{hash} => {
-            println!("ls-tree {}", &hash);
-            let current_directory = std::env::current_dir()
-                .map_err(|_| "Cannot determine current directory".to_string())?;
-            let pretty_print = libwyag::ls_tree(current_directory, &hash)?;
-            println!("Tree: {}", pretty_print);
-            Ok(())
-        },
+        Init{path} => init(path),
+        CatFile{fmt, hash} => cat_file(fmt, hash),
+        HashObject{file_path, fmt, actually_write} =>
+            hash_object(file_path, fmt, actually_write),
+        Log{commit} => log(commit),
+        LsTree{hash} => ls_tree(hash),
         Add => {
             println!("TODO");
             Ok(())
         },
     }
+}
+
+fn init(path: PathBuf) -> Result<()> {
+    println!("Creating repository at {:?}", path);
+    libwyag::create_repository(&path)?;
+    Ok(())
+}
+
+fn cat_file(fmt: String, sha: libwyag::Sha1) -> Result<()> {
+    println!("cat-file {}", &sha);
+
+    let current_directory = std::env::current_dir()
+        .map_err(|_| "Cannot determine current directory".to_string())?;
+    let object = libwyag::cat_file(&current_directory, &fmt, &sha)?;
+
+    if let Ok(object_as_string) = std::str::from_utf8(&object) {
+        println!("Object: {}", object_as_string);
+    } else {
+        println!("Byte blob: {:?}", object);
+    }
+    Ok(())
+}
+
+fn hash_object(file_path: PathBuf, fmt: String, actually_write: bool) -> Result<()> {
+    println!("hash-object {:?}", file_path);
+    let sha = libwyag::hash_object(file_path, &fmt, actually_write)?;
+    println!("Calculated hash is {}", sha);
+    Ok(())
+}
+
+fn log(commit: Option<libwyag::Sha1>) -> Result<()> {
+    println!("log {:?}", commit);
+    if let Some(c) = commit {
+        let current_directory = std::env::current_dir()
+            .map_err(|_| "Cannot determine current directory".to_string())?;
+        println!("{}", libwyag::log(current_directory, &c)?);
+    } else {
+        println!("The commit hash is required at the moment..."); // TODO
+    }
+    Ok(())
+}
+
+fn ls_tree(hash: libwyag::Sha1) -> Result<()> {
+    println!("ls-tree {}", &hash);
+    let current_directory = std::env::current_dir()
+        .map_err(|_| "Cannot determine current directory".to_string())?;
+    let pretty_print = libwyag::ls_tree(current_directory, &hash)?;
+    println!("Tree: {}", pretty_print);
+    Ok(())
 }

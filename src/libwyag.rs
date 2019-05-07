@@ -16,7 +16,7 @@ use flate2::{
 use linked_hash_map::LinkedHashMap;
 use ini::Ini;
 
-type Result<T> = std::result::Result<T, String>;
+pub type Result<T> = std::result::Result<T, String>;
 pub type Sha1 = String;
 
 const CONFIG_INI: &str = "config";
@@ -27,7 +27,7 @@ const GIT_PRIVATE_FOLDER: &str = ".git";
 pub struct GitRepository {
     worktree: PathBuf,
     gitdir: PathBuf,
-    conf: Option<Ini>,
+    conf: Ini,
 }
 
 pub enum GitObject<'a> {
@@ -45,17 +45,17 @@ pub enum GitObject<'a> {
     },
 }
 
+#[derive(Debug)]
+pub struct GitTreeLeaf {
+    mode: u32,
+    path: String,
+    sha: Sha1,
+}
+
 //////// implementations ////////
 
 impl GitRepository {
-    fn new_unsafe<P: AsRef<Path>>(path: P) -> Self {
-        let worktree = path.as_ref().to_path_buf();
-        let gitdir = path.as_ref().join(GIT_PRIVATE_FOLDER);
-        let conf = Ini::load_from_file(gitdir.join(CONFIG_INI)).ok();
-        Self{worktree, gitdir, conf}
-    }
-
-    fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    fn read<P: AsRef<Path>>(path: P) -> Result<Self> {
         let worktree = path.as_ref().to_path_buf();
         let gitdir = path.as_ref().join(GIT_PRIVATE_FOLDER);
 
@@ -71,7 +71,7 @@ impl GitRepository {
             .and_then(|v| v.parse().ok());
 
         match vers {
-            Some(0) => Ok(Self{worktree, gitdir, conf: Some(conf)}),
+            Some(0) => Ok(Self{worktree, gitdir, conf: conf}),
             _ => Err("Unsupported repositoryformatversion".to_string())
         }
     }
@@ -81,6 +81,20 @@ impl<'a> GitObject<'a> {
     const BLOB_FMT: &'static [u8] = b"blob";
     const COMMIT_FMT: &'static [u8] = b"commit";
     const TREE_FMT: &'static [u8] = b"tree";
+
+    fn new(fmt: &[u8], repository: &'a GitRepository, data: &[u8])
+           -> Result<GitObject<'a>> {
+        if fmt == GitObject::BLOB_FMT {
+            Ok(GitObject::new_blob(repository, data.to_vec()))
+        } else if fmt == GitObject::COMMIT_FMT {
+            GitObject::new_commit(repository, data)
+        } else if fmt == GitObject::TREE_FMT {
+            GitObject::new_tree(repository, data)
+        } else {
+            Err(format!("The format {} is not supported",
+                        from_utf8(fmt).expect("fmt should be UTF-8")))
+        }
+    }
 
     fn new_blob(repository: &GitRepository, data: Vec<u8>) -> GitObject {
         GitObject::Blob{repository, data}
@@ -128,38 +142,39 @@ impl<'a> GitObject<'a> {
 //////////// init //////////////
 
 pub fn create_repository<P: AsRef<Path>>(path: P) -> Result<GitRepository> {
-    let repo = GitRepository::new_unsafe(path);
-
-    if repo.worktree.exists() {
-        if !repo.worktree.is_dir() {
-            return Err(format!("{:?} is not a directory", repo.worktree));
+    let path = path.as_ref();
+    if path.exists() {
+        if !path.is_dir() {
+            return Err(format!("{:?} exists and is not a directory", path));
         }
-        let content = repo.worktree.read_dir()
-            .map_err(|_| format!("Cannot read the content of {:?}", repo.worktree))?;
+        let content = path.read_dir()
+            .map_err(|_| format!("Cannot read the content of {:?}", path))?;
         if let Some(_) = content.into_iter().next() {
-            return Err(format!("{:?} is not empty", repo.worktree));
+            return Err(format!("{:?} is not empty", path));
         }
     }
 
-    create_directory(&repo, &["branches"])?;
-    create_directory(&repo, &["objects"])?;
-    create_directory(&repo, &["refs", "tags"])?;
-    create_directory(&repo, &["refs", "heads"])?;
+    let gitdir = path.join(GIT_PRIVATE_FOLDER);
 
-    let mut description_file = create_file(&repo, &["description"])?;
+    create_directory(gitdir.join("branches"))?;
+    create_directory(gitdir.join("objects"))?;
+    create_directory(gitdir.join("refs").join("tags"))?;
+    create_directory(gitdir.join("refs").join("heads"))?;
+
+    let mut description_file = create_file(gitdir.join("description"))?;
     description_file.write_all(
         b"Unnamed repository; edit this file 'description' to name the repository.\n"
     ).map_err(|_| "Cannot write to description file".to_string())?;
 
-    let mut head_file = create_file(&repo, &["HEAD"])?;
+    let mut head_file = create_file(gitdir.join("HEAD"))?;
     head_file.write_all(b"ref: refs/heads/master\n")
         .map_err(|_| "Cannot write to HEAD file".to_string())?;
 
-    let config = repo_default_config();
-    config.write_to_file(get_absolute_path(&repo, &[CONFIG_INI]))
+    let conf = repo_default_config();
+    conf.write_to_file(gitdir.join(CONFIG_INI))
         .map_err(|_| "Cannot write to config file".to_string())?;
 
-    Ok(repo)
+    Ok(GitRepository{worktree: path.to_path_buf(), gitdir, conf})
 }
 
 fn repo_default_config() -> Ini {
@@ -183,24 +198,10 @@ pub fn cat_file<P: AsRef<Path>>(current_directory: P, fmt: &str, sha: &Sha1) -> 
 //////////// hash-object //////////////
 
 pub fn hash_object<P: AsRef<Path>>(file_path: P, fmt: &str, actually_write: bool) -> Result<Sha1> {
-    if fmt.as_bytes() == GitObject::BLOB_FMT {
-        let repository = find_repository_required(&file_path)?;
-        let data = read_file_content(&repository, file_path)?;
-        let blob = GitObject::new_blob(&repository, data);
-        object_write(&blob, actually_write)
-    } else if fmt.as_bytes() == GitObject::COMMIT_FMT {
-        let repository = find_repository_required(&file_path)?;
-        let data = read_file_content(&repository, file_path)?;
-        let commit = GitObject::new_commit(&repository, &data)?;
-        object_write(&commit, actually_write)
-    } else if fmt.as_bytes() == GitObject::TREE_FMT {
-        let repository = find_repository_required(&file_path)?;
-        let data = read_file_content(&repository, file_path)?;
-        let tree = GitObject::new_tree(&repository, &data)?;
-        object_write(&tree, actually_write)
-    } else {
-        Err(format!("Object format {} not supported", fmt))
-    }
+    let repository = find_repository_required(&file_path)?;
+    let data = read_file_content(repository.gitdir.join(file_path))?;
+    let object = GitObject::new(fmt.as_bytes(), &repository, &data)?;
+    object_write(&object, actually_write)
 }
 
 //////////// log //////////////
@@ -269,7 +270,7 @@ fn find_object<'a>(repo: &GitRepository, sha: &'a Sha1, fmt: Option<&str>) -> &'
 }
 
 fn read_object<'a>(repository: &'a GitRepository, sha: &Sha1) -> Result<GitObject<'a>> {
-    let file = read_file(&repository, &["objects", &sha[0..2], &sha[2..]])?;
+    let file = read_file(repository.gitdir.join("objects").join(&sha[0..2]).join(&sha[2..]))?;
     let mut zlib_decoder = ZlibDecoder::new(&file);
     let mut contents = Vec::new();
     zlib_decoder.read_to_end(&mut contents)
@@ -288,19 +289,7 @@ fn read_object<'a>(repository: &'a GitRepository, sha: &Sha1) -> Result<GitObjec
             if size != contents.len() - np - 1 {
                 Err(format!("The size of the object differs from the declared size, which is {}", size))
             } else {
-                if fmt == GitObject::BLOB_FMT {
-                    Ok(GitObject::new_blob(repository, contents[np+1..].to_vec()))
-                } else if fmt == GitObject::COMMIT_FMT {
-                    let commit = GitObject::new_commit(repository, &contents[np+1..])
-                        .map_err(|e| format!("The commit object is not valid: {}", e))?;
-                    Ok(commit)
-                } else if fmt == GitObject::TREE_FMT {
-                    let tree = GitObject::new_tree(repository, &contents[np+1..])
-                        .map_err(|e| format!("The tree object is not valid: {}", e))?;
-                    Ok(tree)
-                } else {
-                    Err(format!("Object format {:?} not supported", fmt))
-                }
+                GitObject::new(fmt, repository, &contents[np+1..])
             }
         }
         _ => Err(format!("Bad format for object with hash {}", sha))
@@ -319,7 +308,7 @@ fn object_write(object: &GitObject, actually_write: bool) -> Result<Sha1> {
     let sha = sha1::Sha1::from(&result).hexdigest();
 
     if actually_write {
-        let file = create_file(object.get_repository(), &["objects", &sha[0..2], &sha[2..]])?;
+        let file = create_file(object.get_repository().gitdir.join("objects").join(&sha[0..2]).join(&&sha[2..]))?;
         let mut zlib_encoder = ZlibEncoder::new(file, Compression::default());
         zlib_encoder.write_all(&result).map_err(|_| "Cannot encode object content".to_string())?;
         zlib_encoder.finish().map_err(|_| "Cannot finilize object write".to_string())?;
@@ -505,13 +494,6 @@ fn test_replace() {
 
 //////////// tree objects //////////////
 
-#[derive(Debug)]
-struct GitTreeLeaf {
-    mode: u32,
-    path: String,
-    sha: Sha1,
-}
-
 fn parse_tree(raw: &[u8]) -> Result<Vec<GitTreeLeaf>> {
     let mut result = Vec::new();
     let mut start = 0;
@@ -527,8 +509,8 @@ fn parse_tree(raw: &[u8]) -> Result<Vec<GitTreeLeaf>> {
 #[test]
 fn test_parse_tree() {
     let raw = b"100644 .gitignore\x00\x89JD\xcc\x06j\x02te\xcd&\xd64\x94\x8dV\xd1:\xf9\xaf\
-100633 LICENSE\x00\x94\xa9\xed\x02M8Yy6\x18\x15.\xa5Y\xa1h\xbb\xcb\xb5\xe2\
-80711 README.md\x00\xba\xb4\x89\xc4\xf4`\n8\xcem\xbf\xd6R\xb9\x03\x83\xa4\xaa>E";
+                100633 LICENSE\x00\x94\xa9\xed\x02M8Yy6\x18\x15.\xa5Y\xa1h\xbb\xcb\xb5\xe2\
+                80711 README.md\x00\xba\xb4\x89\xc4\xf4`\n8\xcem\xbf\xd6R\xb9\x03\x83\xa4\xaa>E";
 
     let tree = parse_tree(raw).unwrap();
     assert_eq!(100644, tree[0].mode);
@@ -584,8 +566,8 @@ fn serialize_tree(tree: &Vec<GitTreeLeaf>) -> Vec<u8> {
 #[test]
 fn test_parse_and_serialize_tree() {
     let raw = b"100644 .gitignore\x00\x89JD\xcc\x06j\x02te\xcd&\xd64\x94\x8dV\xd1:\xf9\xaf\
-100633 LICENSE\x00\x94\xa9\xed\x02M8Yy6\x18\x15.\xa5Y\xa1h\xbb\xcb\xb5\xe2\
-80711 README.md\x00\xba\xb4\x89\xc4\xf4`\n8\xcem\xbf\xd6R\xb9\x03\x83\xa4\xaa>E";
+                100633 LICENSE\x00\x94\xa9\xed\x02M8Yy6\x18\x15.\xa5Y\xa1h\xbb\xcb\xb5\xe2\
+                80711 README.md\x00\xba\xb4\x89\xc4\xf4`\n8\xcem\xbf\xd6R\xb9\x03\x83\xa4\xaa>E";
 
     let tree = parse_tree(raw).unwrap();
     let serialized_raw = serialize_tree(&tree);
@@ -594,54 +576,57 @@ fn test_parse_and_serialize_tree() {
 
 //////////// utility functions //////////////
 
-fn get_absolute_path<P: AsRef<Path>>(repo: &GitRepository, path: &[P]) -> PathBuf {
-    let mut absolute_path = repo.gitdir.clone();
-    for p in path {
-        absolute_path = absolute_path.join(p);
-    }
-    absolute_path
-}
+// fn join(parts: &[&dyn AsRef<Path>]) -> PathBuf {
+//     parts.iter().fold(PathBuf::new(), |acc, p| acc.join(p.as_ref()))
+// }
 
-fn create_directory<P: AsRef<Path>>(repo: &GitRepository, path: &[P]) -> Result<PathBuf> {
-    let directory_path = get_absolute_path(repo, path);
-
-    if directory_path.exists() {
-        if directory_path.is_dir() {
-            return Ok(directory_path);
+fn create_directory<P: AsRef<Path>>(path: P) -> Result<()> {
+    let path = path.as_ref();
+    if path.exists() {
+        if path.is_dir() {
+            Ok(())
         } else {
-            return Err(format!("{:?} is not a directory", directory_path));
+            Err(format!("{:?} is not a directory", path))
         }
-    }
-
-    println!("Creating directory {:?}", directory_path);
-    fs::create_dir_all(&directory_path)
-        .map_err(|_| format!("Cannot create {:?} directory", directory_path))?;
-    Ok(directory_path)
-}
-
-fn read_file<P: AsRef<Path>>(repo: &GitRepository, path: &[P]) -> Result<File> {
-    let directory_path = get_absolute_path(repo, &path[..path.len()-1]);
-    if directory_path.is_dir() {
-        let file_path = get_absolute_path(repo, path);
-        Ok(File::open(&file_path)
-           .map_err(|_| format!("Cannot open {:?} file", file_path))?)
     } else {
-        Err(format!("{:?} is not a directory", directory_path))
+        println!("Creating directory {:?}", path);
+        fs::create_dir_all(&path)
+            .map_err(|_| format!("Cannot create {:?} directory", path))?;
+        Ok(())
     }
 }
 
-fn read_file_content<P: AsRef<Path>>(repository: &GitRepository, file_path: P) -> Result<Vec<u8>> {
-    let mut file = read_file(repository, &[&file_path])?;
+fn read_file<P: AsRef<Path>>(file_path: P) -> Result<File> {
+    let file_path = file_path.as_ref();
+    if let Some(parent) = file_path.parent() {
+        if parent.is_dir() {
+            Ok(File::open(file_path)
+               .map_err(|_| format!("Cannot open {:?} file", file_path))?)
+        } else {
+            Err(format!("{:?} is not a directory", parent))
+        }
+    } else {
+        Err(format!("Path not valid: {:?}", file_path))
+    }
+}
+
+fn read_file_content<P: AsRef<Path>>(file_path: P) -> Result<Vec<u8>> {
+    let mut file = read_file(&file_path)?;
     let mut data = Vec::new();
     file.read_to_end(&mut data)
         .map_err(|_| format!("Cannot read file {:?}", file_path.as_ref()))?;
     Ok(data)
 }
 
-fn create_file<P: AsRef<Path>>(repo: &GitRepository, path: &[P]) -> Result<File> {
-    create_directory(repo, &path[..path.len()-1])?;
-    let file_path = get_absolute_path(repo, path);
-    Ok(File::create(&file_path).map_err(|_| format!("Cannot create file {:?}", file_path))?)
+fn create_file<P: AsRef<Path>>(file_path: P) -> Result<File> {
+    let file_path = file_path.as_ref();
+    if let Some(parent) = file_path.parent() {
+        create_directory(parent)?;
+        Ok(File::create(&file_path)
+           .map_err(|_| format!("Cannot create file {:?}", file_path))?)
+    } else {
+        Err(format!("Path not valid {:?}", file_path))
+    }
 }
 
 fn find_repository<P: AsRef<Path>>(path: P) -> Option<Result<GitRepository>> {
@@ -649,7 +634,7 @@ fn find_repository<P: AsRef<Path>>(path: P) -> Option<Result<GitRepository>> {
         println!("Checking {:?}", ancestor);
         if ancestor.join(GIT_PRIVATE_FOLDER).is_dir() {
             println!("Found .git in {:?}", ancestor);
-            return Some(GitRepository::new(ancestor));
+            return Some(GitRepository::read(ancestor));
         }
     }
     None
