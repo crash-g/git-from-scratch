@@ -49,7 +49,17 @@ enum Command {
     #[structopt(name = "ls-tree")]
     /// Pretty-print a tree object
     LsTree {
+        /// The hash of the tree object
         hash: libwyag::Sha1,
+    },
+
+    #[structopt(name = "checkout")]
+    /// Checkout a commit inside an empty directory
+    Checkout {
+        /// The hash of a tree or of a commit
+        hash: libwyag::Sha1,
+        /// The directory where to checkout the commit
+        path: PathBuf,
     },
 
     #[structopt(name = "add")]
@@ -68,6 +78,7 @@ fn main() -> Result<()> {
             hash_object(file_path, fmt, actually_write),
         Log{commit} => log(commit),
         LsTree{hash} => ls_tree(hash),
+        Checkout{hash, path} => checkout(hash, path),
         Add => {
             println!("TODO");
             Ok(())
@@ -122,4 +133,11 @@ fn ls_tree(hash: libwyag::Sha1) -> Result<()> {
     let pretty_print = libwyag::ls_tree(current_directory, &hash)?;
     println!("Tree: {}", pretty_print);
     Ok(())
+}
+
+fn checkout(hash: libwyag::Sha1, path: PathBuf) -> Result<()> {
+    println!("checkout {} to {:?}", &hash, path);
+    let current_directory = std::env::current_dir()
+        .map_err(|_| "Cannot determine current directory".to_string())?;
+    libwyag::checkout_tree(current_directory, &hash, path)
 }

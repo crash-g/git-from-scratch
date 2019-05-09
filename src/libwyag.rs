@@ -143,16 +143,8 @@ impl<'a> GitObject<'a> {
 
 pub fn create_repository<P: AsRef<Path>>(path: P) -> Result<GitRepository> {
     let path = path.as_ref();
-    if path.exists() {
-        if !path.is_dir() {
-            return Err(format!("{:?} exists and is not a directory", path));
-        }
-        let content = path.read_dir()
-            .map_err(|_| format!("Cannot read the content of {:?}", path))?;
-        if let Some(_) = content.into_iter().next() {
-            return Err(format!("{:?} is not empty", path));
-        }
-    }
+    create_directory(&path)?;
+    check_is_empty(&path)?;
 
     let gitdir = path.join(GIT_PRIVATE_FOLDER);
 
@@ -261,6 +253,61 @@ pub fn ls_tree<P: AsRef<Path>>(current_directory: P, sha: &Sha1) -> Result<Strin
         },
         _ => Err(format!("The hash {} is not relative to a tree", sha))
     }
+}
+
+//////////// checkout tree //////////////
+
+pub fn checkout_tree<P: AsRef<Path>>(current_directory: P, sha: &Sha1, path: P) -> Result<()> {
+    let repository = find_repository_required(current_directory)?;
+    let sha = find_object(&repository, sha, None); // TODO None correct?
+    let object = read_object(&repository, &sha)?;
+
+    let tree_data = match object {
+        GitObject::Tree{repository: _, data} => data,
+        GitObject::Commit{repository: _, data} => {
+            let tree_hash = match data.get("tree") {
+                Some(vec) if vec.len() == 1 => {
+                    from_utf8(vec.get(0).unwrap())
+                        .map_err(|_| "The value of the tree hash is not valid UTF-8".to_string())?
+                },
+                None => return Err(format!("Tree not found for commit {}", sha)),
+                _ => return Err(format!("Too many trees for commit {}", sha)),
+            };
+            match read_object(&repository, &tree_hash.to_string())? {
+                GitObject::Tree{repository: _, data} => data,
+                _ => return Err(format!("The commit tree has an invalid hash")),
+            }
+        },
+        _ => return Err(format!("The hash {} does not refer to either a commit or a tree", sha)),
+    };
+
+    let path = path.as_ref();
+    create_directory(path)?;
+    check_is_empty(path)?;
+    checkout_tree_impl(&repository, &tree_data, path)
+}
+
+fn checkout_tree_impl<P: AsRef<Path>>(repository: &GitRepository,
+                                      tree: &Vec<GitTreeLeaf>,
+                                      path: P) -> Result<()> {
+    for leaf in tree {
+        let object = read_object(&repository, &leaf.sha)?;
+        let dest = path.as_ref().join(&leaf.path);
+
+        match object {
+            GitObject::Tree{repository: _, data} => {
+                create_directory(&dest)?;
+                checkout_tree_impl(&repository, &data, dest)?;
+            },
+            GitObject::Blob{repository: _, data} => {
+                let mut file = create_file(&dest)?;
+                file.write_all(&data)
+                    .map_err(|_| format!("Cannot write to file {:?}", dest))?;
+            },
+            _ => return Err("This tree contains an object which is neither a tree or a blob".to_string()),
+        }
+    }
+    Ok(())
 }
 
 //////////// read/write //////////////
@@ -593,6 +640,25 @@ fn create_directory<P: AsRef<Path>>(path: P) -> Result<()> {
         fs::create_dir_all(&path)
             .map_err(|_| format!("Cannot create {:?} directory", path))?;
         Ok(())
+    }
+}
+
+fn check_is_empty<P: AsRef<Path>>(path: P) -> Result<()> {
+    let path = path.as_ref();
+    if path.exists() {
+        if !path.is_dir() {
+            Err(format!("{:?} exists and is not a directory", path))
+        } else {
+            let content = path.read_dir()
+                .map_err(|_| format!("Cannot read the content of {:?}", path))?;
+            if let Some(_) = content.into_iter().next() {
+                Err(format!("{:?} is not empty", path))
+            } else {
+                Ok(())
+            }
+        }
+    } else {
+        Err(format!("{:?} does not exist", path))
     }
 }
 
