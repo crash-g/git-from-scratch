@@ -62,6 +62,10 @@ enum Command {
         path: PathBuf,
     },
 
+    #[structopt(name = "show-ref")]
+    /// Print all the references in the repository
+    ShowRef,
+
     #[structopt(name = "add")]
     /// Add files
     Add,
@@ -79,6 +83,7 @@ fn main() -> Result<()> {
         Log{commit} => log(commit),
         LsTree{hash} => ls_tree(hash),
         Checkout{hash, path} => checkout(hash, path),
+        ShowRef => show_references(),
         Add => {
             println!("TODO");
             Ok(())
@@ -140,4 +145,12 @@ fn checkout(hash: libwyag::Sha1, path: PathBuf) -> Result<()> {
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
     libwyag::checkout_tree(current_directory, &hash, path)
+}
+
+fn show_references() -> Result<()> {
+    println!("show-ref");
+    let current_directory = std::env::current_dir()
+        .map_err(|_| "Cannot determine current directory".to_string())?;
+    libwyag::show_references(current_directory)?;
+    Ok(())
 }

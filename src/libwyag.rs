@@ -310,6 +310,54 @@ fn checkout_tree_impl<P: AsRef<Path>>(repository: &GitRepository,
     Ok(())
 }
 
+//////////// references //////////////
+
+pub fn show_references<P: AsRef<Path>>(current_directory: P) -> Result<()> {
+    let repository = find_repository_required(current_directory)?;
+    let references = list_references::<PathBuf>(&repository, None)?;
+    for (path, hash) in references {
+        println!("{:?} -> {}", path, hash);
+    }
+    Ok(())
+}
+
+fn list_references<P: AsRef<Path>>(repository: &GitRepository, custom_full_path: Option<P>) -> Result<LinkedHashMap<PathBuf, Sha1>> {
+    let path;
+    if let Some(p) = custom_full_path {
+        path = p.as_ref().to_path_buf();
+    } else {
+        path = repository.gitdir.join("refs");
+    }
+
+    let mut results = LinkedHashMap::new();
+    let mut directory_content = read_directory_content(path)?;
+    directory_content.sort_unstable();
+    for entry in directory_content {
+        if entry.is_dir() {
+            for nested_reference in list_references(repository, Some(entry))? {
+                results.insert(nested_reference.0, nested_reference.1);
+            }
+        } else {
+            let reference = resolve_reference(repository, &entry)?;
+            results.insert(entry, reference);
+        }
+    }
+    Ok(results)
+}
+
+fn resolve_reference<P: AsRef<Path>>(repository: &GitRepository, reference: P) -> Result<Sha1> {
+    let path = repository.gitdir.join(&reference);
+    let data = read_file_content(path)?;
+    let reference_value = from_utf8(&data)
+        .map_err(|_| format!("The reference {:?} does not contain valid UTF-8", reference.as_ref()))?;
+    let reference_prefix = "ref: ";
+    if reference_value.starts_with(reference_prefix) {
+        resolve_reference(repository, reference_value[reference_prefix.len()..].trim())
+    } else {
+        Ok(reference_value.to_string())
+    }
+}
+
 //////////// read/write //////////////
 
 fn find_object<'a>(repo: &GitRepository, sha: &'a Sha1, fmt: Option<&str>) -> &'a Sha1 {
@@ -641,6 +689,18 @@ fn create_directory<P: AsRef<Path>>(path: P) -> Result<()> {
             .map_err(|_| format!("Cannot create {:?} directory", path))?;
         Ok(())
     }
+}
+
+fn read_directory_content<P: AsRef<Path>>(path: P) -> Result<Vec<PathBuf>> {
+    let path = path.as_ref();
+    let mut results = Vec::new();
+    for entry in path.read_dir()
+        .map_err(|e| format!("Cannot read a directory entry: {}", e))? {
+        if let Ok(entry) = entry {
+            results.push(entry.path())
+        }
+    }
+    Ok(results)
 }
 
 fn check_is_empty<P: AsRef<Path>>(path: P) -> Result<()> {
