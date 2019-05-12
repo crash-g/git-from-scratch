@@ -66,6 +66,20 @@ enum Command {
     /// Print all the references in the repository
     ShowRef,
 
+    #[structopt(name = "tag")]
+    /// List all tags or add a new tag
+    Tag {
+        /// The name of the tag
+        name: Option<String>,
+
+        /// The object the new tag will point to
+        object: Option<libwyag::Sha1>,
+
+        /// Add a tag object (otherwise, just add a tag reference)
+        #[structopt(short = "a")]
+        add_tag_object: bool,
+    },
+
     #[structopt(name = "add")]
     /// Add files
     Add,
@@ -84,6 +98,13 @@ fn main() -> Result<()> {
         LsTree{hash} => ls_tree(hash),
         Checkout{hash, path} => checkout(hash, path),
         ShowRef => show_references(),
+        Tag{name, object, add_tag_object} => {
+            match (name, object) {
+                (None, None) => list_tags(),
+                (None, _) => Err("The tag name is required when adding a tag".to_string()),
+                (Some(name), object) => add_tag(name, object, add_tag_object),
+            }
+        }
         Add => {
             println!("TODO");
             Ok(())
@@ -102,7 +123,8 @@ fn cat_file(fmt: String, sha: libwyag::Sha1) -> Result<()> {
 
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
-    let object = libwyag::cat_file(&current_directory, &fmt, &sha)?;
+    let repository = libwyag::find_repository_required(current_directory)?;
+    let object = libwyag::cat_file(&repository, &fmt, &sha)?;
 
     if let Ok(object_as_string) = std::str::from_utf8(&object) {
         println!("Object: {}", object_as_string);
@@ -135,7 +157,8 @@ fn ls_tree(hash: libwyag::Sha1) -> Result<()> {
     println!("ls-tree {}", &hash);
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
-    let pretty_print = libwyag::ls_tree(current_directory, &hash)?;
+    let repository = libwyag::find_repository_required(current_directory)?;
+    let pretty_print = libwyag::ls_tree(&repository, &hash)?;
     println!("Tree: {}", pretty_print);
     Ok(())
 }
@@ -144,13 +167,37 @@ fn checkout(hash: libwyag::Sha1, path: PathBuf) -> Result<()> {
     println!("checkout {} to {:?}", &hash, path);
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
-    libwyag::checkout_tree(current_directory, &hash, path)
+    let repository = libwyag::find_repository_required(current_directory)?;
+    libwyag::checkout_tree(&repository, &hash, path)
 }
 
 fn show_references() -> Result<()> {
     println!("show-ref");
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
-    libwyag::show_references(current_directory)?;
+    let repository = libwyag::find_repository_required(current_directory)?;
+    libwyag::show_references::<PathBuf>(&repository, None)?;
     Ok(())
+}
+
+fn list_tags() -> Result<()> {
+    println!("tag");
+    let current_directory = std::env::current_dir()
+        .map_err(|_| "Cannot determine current directory".to_string())?;
+    let repository = libwyag::find_repository_required(current_directory)?;
+    libwyag::show_references(&repository, Some(repository.gitdir().join("refs").join("tags")))?;
+    Ok(())
+}
+
+fn add_tag(name: String, object: Option<libwyag::Sha1>, add_tag_object: bool) -> Result<()> {
+    println!("tag with name {} pointing to {:?}", name, object);
+    let current_directory = std::env::current_dir()
+        .map_err(|_| "Cannot determine current directory".to_string())?;
+    let repository = libwyag::find_repository_required(current_directory)?;
+
+    if add_tag_object {
+        libwyag::create_tag_object(&repository, &name, &object.expect("An object is required at the moment (TODO)"))
+    } else {
+        libwyag::create_tag(&repository, &name, &object.expect("An object is required at the moment (TODO)"))
+    }
 }

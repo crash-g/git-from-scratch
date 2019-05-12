@@ -43,6 +43,10 @@ pub enum GitObject<'a> {
         repository: &'a GitRepository,
         data: Vec<GitTreeLeaf>,
     },
+    Tag {
+        repository: &'a GitRepository,
+        data: LinkedHashMap<String, Vec<Vec<u8>>>,
+    },
 }
 
 #[derive(Debug)]
@@ -75,12 +79,17 @@ impl GitRepository {
             _ => Err("Unsupported repositoryformatversion".to_string())
         }
     }
+
+    pub fn gitdir(&self) -> &Path {
+        &self.gitdir
+    }
 }
 
 impl<'a> GitObject<'a> {
     const BLOB_FMT: &'static [u8] = b"blob";
     const COMMIT_FMT: &'static [u8] = b"commit";
     const TREE_FMT: &'static [u8] = b"tree";
+    const TAG_FMT: &'static [u8] = b"tag";
 
     fn new(fmt: &[u8], repository: &'a GitRepository, data: &[u8])
            -> Result<GitObject<'a>> {
@@ -90,6 +99,8 @@ impl<'a> GitObject<'a> {
             GitObject::new_commit(repository, data)
         } else if fmt == GitObject::TREE_FMT {
             GitObject::new_tree(repository, data)
+        } else if fmt == GitObject::TAG_FMT {
+            GitObject::new_tag(repository, data)
         } else {
             Err(format!("The format {} is not supported",
                         from_utf8(fmt).expect("fmt should be UTF-8")))
@@ -111,12 +122,19 @@ impl<'a> GitObject<'a> {
         Ok(GitObject::Tree{repository, data: tree})
     }
 
+    fn new_tag(repository: &'a GitRepository, data: &[u8]) -> Result<GitObject<'a>> {
+        let mut dict = LinkedHashMap::new();
+        parse_kvlm(&data, &mut dict)?;
+        Ok(GitObject::Tag{repository, data: dict})
+    }
+
     fn serialize(&self) -> Vec<u8> {
         use GitObject::*;
         match self {
             Blob{repository: _, data} => data.to_vec(),
             Commit{repository: _, data} => serialize_kvlm(&data),
             Tree{repository: _, data} => serialize_tree(&data),
+            Tag{repository: _, data} => serialize_kvlm(&data),
         }
     }
 
@@ -126,6 +144,7 @@ impl<'a> GitObject<'a> {
             Blob{..} => GitObject::BLOB_FMT,
             Commit{..} => GitObject::COMMIT_FMT,
             Tree{..} => GitObject::TREE_FMT,
+            Tag{..} => GitObject::TAG_FMT,
         }
     }
 
@@ -135,6 +154,7 @@ impl<'a> GitObject<'a> {
             Blob{repository, data: _} => repository,
             Commit{repository, data: _} => repository,
             Tree{repository, data: _} => repository,
+            Tag{repository, data: _} => repository,
         }
     }
 }
@@ -180,8 +200,7 @@ fn repo_default_config() -> Ini {
 
 //////////// cat-file //////////////
 
-pub fn cat_file<P: AsRef<Path>>(current_directory: P, fmt: &str, sha: &Sha1) -> Result<Vec<u8>> {
-    let repository = find_repository_required(current_directory)?;
+pub fn cat_file(repository: &GitRepository, fmt: &str, sha: &Sha1) -> Result<Vec<u8>> {
     let sha = find_object(&repository, sha, Some(fmt));
     let git_object = read_object(&repository, sha)?;
     Ok(git_object.serialize())
@@ -193,7 +212,7 @@ pub fn hash_object<P: AsRef<Path>>(file_path: P, fmt: &str, actually_write: bool
     let repository = find_repository_required(&file_path)?;
     let data = read_file_content(repository.gitdir.join(file_path))?;
     let object = GitObject::new(fmt.as_bytes(), &repository, &data)?;
-    object_write(&object, actually_write)
+    write_object(&object, actually_write)
 }
 
 //////////// log //////////////
@@ -236,8 +255,7 @@ fn make_graphviz_string(repository: &GitRepository, sha: &Sha1, seen: &mut HashS
 
 //////////// ls-tree //////////////
 
-pub fn ls_tree<P: AsRef<Path>>(current_directory: P, sha: &Sha1) -> Result<String> {
-    let repository = find_repository_required(current_directory)?;
+pub fn ls_tree(repository: &GitRepository, sha: &Sha1) -> Result<String> {
     let sha = find_object(&repository, sha, None); // TODO None correct?
     let tree = read_object(&repository, &sha)?;
 
@@ -257,8 +275,7 @@ pub fn ls_tree<P: AsRef<Path>>(current_directory: P, sha: &Sha1) -> Result<Strin
 
 //////////// checkout tree //////////////
 
-pub fn checkout_tree<P: AsRef<Path>>(current_directory: P, sha: &Sha1, path: P) -> Result<()> {
-    let repository = find_repository_required(current_directory)?;
+pub fn checkout_tree<P: AsRef<Path>>(repository: &GitRepository, sha: &Sha1, path: P) -> Result<()> {
     let sha = find_object(&repository, sha, None); // TODO None correct?
     let object = read_object(&repository, &sha)?;
 
@@ -310,52 +327,39 @@ fn checkout_tree_impl<P: AsRef<Path>>(repository: &GitRepository,
     Ok(())
 }
 
-//////////// references //////////////
+//////////// show references //////////////
 
-pub fn show_references<P: AsRef<Path>>(current_directory: P) -> Result<()> {
-    let repository = find_repository_required(current_directory)?;
-    let references = list_references::<PathBuf>(&repository, None)?;
+pub fn show_references<P: AsRef<Path>>(repository: &GitRepository, custom_full_path: Option<P>) -> Result<()> {
+    let references = list_references(&repository, custom_full_path)?;
     for (path, hash) in references {
         println!("{:?} -> {}", path, hash);
     }
     Ok(())
 }
 
-fn list_references<P: AsRef<Path>>(repository: &GitRepository, custom_full_path: Option<P>) -> Result<LinkedHashMap<PathBuf, Sha1>> {
-    let path;
-    if let Some(p) = custom_full_path {
-        path = p.as_ref().to_path_buf();
-    } else {
-        path = repository.gitdir.join("refs");
-    }
+//////////// tag //////////////
 
-    let mut results = LinkedHashMap::new();
-    let mut directory_content = read_directory_content(path)?;
-    directory_content.sort_unstable();
-    for entry in directory_content {
-        if entry.is_dir() {
-            for nested_reference in list_references(repository, Some(entry))? {
-                results.insert(nested_reference.0, nested_reference.1);
-            }
-        } else {
-            let reference = resolve_reference(repository, &entry)?;
-            results.insert(entry, reference);
-        }
-    }
-    Ok(results)
+pub fn create_tag(repository: &GitRepository, name: &str, reference: &Sha1) -> Result<()> {
+    let sha = find_object(&repository, reference, None); // TODO
+    create_reference(&repository, Path::new("tags").join(name), sha)?;
+    Ok(())
 }
 
-fn resolve_reference<P: AsRef<Path>>(repository: &GitRepository, reference: P) -> Result<Sha1> {
-    let path = repository.gitdir.join(&reference);
-    let data = read_file_content(path)?;
-    let reference_value = from_utf8(&data)
-        .map_err(|_| format!("The reference {:?} does not contain valid UTF-8", reference.as_ref()))?;
-    let reference_prefix = "ref: ";
-    if reference_value.starts_with(reference_prefix) {
-        resolve_reference(repository, reference_value[reference_prefix.len()..].trim())
-    } else {
-        Ok(reference_value.to_string())
-    }
+pub fn create_tag_object(repository: &GitRepository, name: &str, reference: &Sha1) -> Result<()> {
+    let sha = find_object(&repository, reference, None); // TODO
+
+    // TODO this does not make a lot of sense...
+    let tag_data = format!("object {}
+type commit
+tag {}
+tagger unknown
+
+This is the message and should have come from the user", sha, name);;
+    let tag = GitObject::new_tag(&repository, tag_data.as_bytes())?;
+
+    let sha = write_object(&tag, true)?;
+    create_reference(&repository, Path::new("tags").join(name), &sha)?;
+    Ok(())
 }
 
 //////////// read/write //////////////
@@ -391,7 +395,7 @@ fn read_object<'a>(repository: &'a GitRepository, sha: &Sha1) -> Result<GitObjec
     }
 }
 
-fn object_write(object: &GitObject, actually_write: bool) -> Result<Sha1> {
+fn write_object(object: &GitObject, actually_write: bool) -> Result<Sha1> {
     let data = object.serialize();
 
     let mut result = object.get_fmt().to_vec();
@@ -422,7 +426,7 @@ fn test_blob_write_read() {
     let repository = create_repository(&test_path).unwrap();
     let git_blob = GitObject::new_blob(&repository, b"100".to_vec());
 
-    let sha = object_write(&git_blob, true).unwrap();
+    let sha = write_object(&git_blob, true).unwrap();
     let git_object = read_object(&repository, &sha).unwrap();
 
     use GitObject::*;
@@ -669,7 +673,77 @@ fn test_parse_and_serialize_tree() {
     assert_eq!(raw.to_vec(), serialized_raw);
 }
 
+//////////// references //////////////
+
+fn list_references<P: AsRef<Path>>(repository: &GitRepository, custom_full_path: Option<P>) -> Result<LinkedHashMap<PathBuf, Sha1>> {
+    let path = if let Some(p) = custom_full_path {
+        p.as_ref().to_path_buf()
+    } else {
+        repository.gitdir.join("refs")
+    };
+
+    let mut results = LinkedHashMap::new();
+    let mut directory_content = read_directory_content(path)?;
+    directory_content.sort_unstable();
+    for entry in directory_content {
+        if entry.is_dir() {
+            for nested_reference in list_references(repository, Some(entry))? {
+                results.insert(nested_reference.0, nested_reference.1);
+            }
+        } else {
+            let reference = resolve_reference(repository, &entry)?;
+            results.insert(entry, reference);
+        }
+    }
+    Ok(results)
+}
+
+fn resolve_reference<P: AsRef<Path>>(repository: &GitRepository, reference: P) -> Result<Sha1> {
+    let path = repository.gitdir.join(&reference);
+    let data = read_file_content(path)?;
+    let reference_value = from_utf8(&data)
+        .map_err(|_| format!("The reference {:?} does not contain valid UTF-8", reference.as_ref()))?;
+    let reference_prefix = "ref: ";
+    if reference_value.starts_with(reference_prefix) {
+        resolve_reference(repository, reference_value[reference_prefix.len()..].trim())
+    } else {
+        Ok(reference_value.to_string())
+    }
+}
+
+fn create_reference<P: AsRef<Path>>(repository: &GitRepository, reference: P, sha: &Sha1) -> Result<()> {
+    let path = repository.gitdir.join("refs").join(reference);
+    let mut file = create_file(&path)?;
+    let mut sha = sha.clone();
+    sha.push('\n');
+    file.write_all(sha.as_bytes())
+        .map_err(|_| format!("Cannot write to reference file {:?}", path))?;
+    Ok(())
+}
+
 //////////// utility functions //////////////
+
+fn find_repository<P: AsRef<Path>>(path: P) -> Option<Result<GitRepository>> {
+    for ancestor in path.as_ref().ancestors() {
+        println!("Checking {:?}", ancestor);
+        if ancestor.join(GIT_PRIVATE_FOLDER).is_dir() {
+            println!("Found .git in {:?}", ancestor);
+            return Some(GitRepository::read(ancestor));
+        }
+    }
+    None
+}
+
+#[test]
+fn test_find_repository() {
+    let path = Path::new("/home/user/bad/path");
+    let repo = find_repository(path);
+    assert!(repo.is_none());
+}
+
+pub fn find_repository_required<P: AsRef<Path>>(path: P) -> Result<GitRepository> {
+    find_repository(&path).ok_or(format!("Repository not found in {:?}", path.as_ref()))?
+}
 
 // fn join(parts: &[&dyn AsRef<Path>]) -> PathBuf {
 //     parts.iter().fold(PathBuf::new(), |acc, p| acc.join(p.as_ref()))
@@ -695,7 +769,7 @@ fn read_directory_content<P: AsRef<Path>>(path: P) -> Result<Vec<PathBuf>> {
     let path = path.as_ref();
     let mut results = Vec::new();
     for entry in path.read_dir()
-        .map_err(|e| format!("Cannot read a directory entry: {}", e))? {
+        .map_err(|e| format!("Cannot read a directory entry from {:?}: {}", path, e))? {
         if let Ok(entry) = entry {
             results.push(entry.path())
         }
@@ -753,26 +827,4 @@ fn create_file<P: AsRef<Path>>(file_path: P) -> Result<File> {
     } else {
         Err(format!("Path not valid {:?}", file_path))
     }
-}
-
-fn find_repository<P: AsRef<Path>>(path: P) -> Option<Result<GitRepository>> {
-    for ancestor in path.as_ref().ancestors() {
-        println!("Checking {:?}", ancestor);
-        if ancestor.join(GIT_PRIVATE_FOLDER).is_dir() {
-            println!("Found .git in {:?}", ancestor);
-            return Some(GitRepository::read(ancestor));
-        }
-    }
-    None
-}
-
-fn find_repository_required<P: AsRef<Path>>(path: P) -> Result<GitRepository> {
-    find_repository(&path).ok_or(format!("Repository not found in {:?}", path.as_ref()))?
-}
-
-#[test]
-fn test_find_repository() {
-    let path = Path::new("/home/user/bad/path");
-    let repo = find_repository(path);
-    assert!(repo.is_none());
 }
