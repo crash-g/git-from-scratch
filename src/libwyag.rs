@@ -14,6 +14,7 @@ use flate2::{
 };
 
 use linked_hash_map::LinkedHashMap;
+use regex::Regex;
 use ini::Ini;
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -201,8 +202,8 @@ fn repo_default_config() -> Ini {
 //////////// cat-file //////////////
 
 pub fn cat_file(repository: &GitRepository, fmt: &str, sha: &Sha1) -> Result<Vec<u8>> {
-    let sha = find_object(&repository, sha, Some(fmt));
-    let git_object = read_object(&repository, sha)?;
+    let sha = find_object_of_type(&repository, &sha, fmt, false)?;
+    let git_object = read_object(&repository, &sha)?;
     Ok(git_object.serialize())
 }
 
@@ -256,7 +257,7 @@ fn make_graphviz_string(repository: &GitRepository, sha: &Sha1, seen: &mut HashS
 //////////// ls-tree //////////////
 
 pub fn ls_tree(repository: &GitRepository, sha: &Sha1) -> Result<String> {
-    let sha = find_object(&repository, sha, None); // TODO None correct?
+    let sha = find_object(&repository, &sha)?;
     let tree = read_object(&repository, &sha)?;
 
     match tree {
@@ -276,7 +277,7 @@ pub fn ls_tree(repository: &GitRepository, sha: &Sha1) -> Result<String> {
 //////////// checkout tree //////////////
 
 pub fn checkout_tree<P: AsRef<Path>>(repository: &GitRepository, sha: &Sha1, path: P) -> Result<()> {
-    let sha = find_object(&repository, sha, None); // TODO None correct?
+    let sha = find_object(&repository, &sha)?;
     let object = read_object(&repository, &sha)?;
 
     let tree_data = match object {
@@ -339,14 +340,16 @@ pub fn show_references<P: AsRef<Path>>(repository: &GitRepository, custom_full_p
 
 //////////// tag //////////////
 
+/// Create a "lightweight" reference to a commit, tree or blob
 pub fn create_tag(repository: &GitRepository, name: &str, reference: &Sha1) -> Result<()> {
-    let sha = find_object(&repository, reference, None); // TODO
-    create_reference(&repository, Path::new("tags").join(name), sha)?;
+    let sha = find_object(&repository, reference)?;
+    create_reference(&repository, Path::new("tags").join(name), &sha)?;
     Ok(())
 }
 
+/// Create a full-fledged tag object
 pub fn create_tag_object(repository: &GitRepository, name: &str, reference: &Sha1) -> Result<()> {
-    let sha = find_object(&repository, reference, None); // TODO
+    let sha = find_object(&repository, reference)?;
 
     // TODO this does not make a lot of sense...
     let tag_data = format!("object {}
@@ -362,10 +365,75 @@ This is the message and should have come from the user", sha, name);;
     Ok(())
 }
 
-//////////// read/write //////////////
+//////////// read/write/search //////////////
 
-fn find_object<'a>(repo: &GitRepository, sha: &'a Sha1, fmt: Option<&str>) -> &'a Sha1 {
-    sha
+pub fn find_object_of_type(repository: &GitRepository, sha: &Sha1, fmt: &str, follow: bool) -> Result<Sha1> {
+    let sha = resolve_object(repository, sha)?;
+
+    let object = read_object(repository, &sha)?;
+    if object.get_fmt() == fmt.as_bytes() {
+        return Ok(sha);
+    } else if !follow {
+        return Err(format!("{} does not have type {}", sha, fmt));
+    }
+
+    let parsed_element = match object {
+        GitObject::Tag{repository: _, data} => {
+            data.get("object")
+                .ok_or(format!("Cannot find 'object' section in tag {}", sha))
+                .map(|section| section.get(0)
+                     .expect(&format!("Section 'object' in tag {} is empty", sha)))?
+                .to_vec()
+        }
+        GitObject::Commit{repository: _, data} => {
+            data.get("tree")
+                .ok_or(format!("Cannot find 'tree' section in commit {}", sha))
+                .map(|section| section.get(0)
+                     .expect(&format!("Section 'tree' in commit {} is empty", sha)))?
+                .to_vec()
+        }
+        _ => {
+            return Err(format!("Cannot follow {} which is neither a tag nor a commit", sha));
+        }
+    };
+
+    let sha = from_utf8(&parsed_element)
+        .map_err(|_| format!("Sections of {} do not contain valid UTF-8", sha))?;
+
+    find_object_of_type(repository, &sha.to_string(), fmt, true)
+}
+
+fn find_object(repository: &GitRepository, sha: &Sha1) -> Result<Sha1> {
+    resolve_object(repository, sha)
+}
+
+fn resolve_object(repository: &GitRepository, name: &str) -> Result<Sha1> {
+    lazy_static! {
+        static ref HASH_RE: Regex = Regex::new(r"^[0-9A-Fa-f]{4,40}$")
+            .expect("Cannot compile HASH_RE regex");
+    }
+
+    if name == "HEAD" {
+        return resolve_reference(repository, name);
+    }
+
+    if HASH_RE.is_match(name) {
+        if name.len() == 40 {
+            return Ok(name.to_lowercase());
+        }
+        let name = name.to_lowercase();
+        let paths = read_directory_content(repository.gitdir.join("objects").join(&name[..2]))
+            .map_err(|_| format!("{} is not a valid short hash", name));
+        let candidates: Vec<String> = paths?.iter()
+            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(&name[2..]))
+            .map(|p| name[..2].to_string() + p.file_name().unwrap().to_string_lossy().as_ref()).collect();
+        if candidates.len() == 1 {
+            return Ok(candidates[0].clone());
+        } else if candidates.len() > 1 {
+            return Err(format!("Found {} candidates for {}", candidates.len(), name));
+        }
+    }
+    Err(format!("{} cannot be resolved to a hash", name))
 }
 
 fn read_object<'a>(repository: &'a GitRepository, sha: &Sha1) -> Result<GitObject<'a>> {
@@ -437,6 +505,8 @@ fn test_blob_write_read() {
 }
 
 //////////// key-value list with message //////////////
+
+// TODO check if it makes sense for the hashmap to become LinkedHashMap<String, Vec<String>>
 
 fn parse_kvlm(raw: &[u8], dict: &mut LinkedHashMap<String, Vec<Vec<u8>>>) -> Result<()> {
     let space_position = raw.iter().position(|b| *b == b' ');
@@ -674,6 +744,14 @@ fn test_parse_and_serialize_tree() {
 }
 
 //////////// references //////////////
+
+// A reference is either
+// - indirect: a path to a file prepended by 'ref:',
+// - direct: the hash of a Git Object
+//
+// Examples of references are branches and lightweight tags.
+// Also, note that HEAD is always an indirect reference to a branch, unless
+// Git is in detached HEAD state, in which case it is a direct reference to a commit
 
 fn list_references<P: AsRef<Path>>(repository: &GitRepository, custom_full_path: Option<P>) -> Result<LinkedHashMap<PathBuf, Sha1>> {
     let path = if let Some(p) = custom_full_path {

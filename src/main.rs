@@ -1,3 +1,5 @@
+#[macro_use] extern crate lazy_static;
+
 use structopt::StructOpt;
 use std::path::PathBuf;
 
@@ -80,6 +82,16 @@ enum Command {
         add_tag_object: bool,
     },
 
+    #[structopt(name = "rev-parse")]
+    /// Parse revision (or other objects) identifiers
+    RevParse {
+        /// The identifier of the object
+        name: String,
+
+        /// The type of the object
+        fmt: String,
+    },
+
     #[structopt(name = "add")]
     /// Add files
     Add,
@@ -105,6 +117,7 @@ fn main() -> Result<()> {
                 (Some(name), object) => add_tag(name, object, add_tag_object),
             }
         }
+        RevParse{name, fmt} => rev_parse(name, fmt),
         Add => {
             println!("TODO");
             Ok(())
@@ -200,4 +213,14 @@ fn add_tag(name: String, object: Option<libwyag::Sha1>, add_tag_object: bool) ->
     } else {
         libwyag::create_tag(&repository, &name, &object.expect("An object is required at the moment (TODO)"))
     }
+}
+
+fn rev_parse(name: String, fmt: String) -> Result<()> {
+    println!("rev-parse");
+    let current_directory = std::env::current_dir()
+        .map_err(|_| "Cannot determine current directory".to_string())?;
+    let repository = libwyag::find_repository_required(current_directory)?;
+    let sha = libwyag::find_object_of_type(&repository, &name, &fmt, true)?;
+    println!("The complete hash associated to {} is {}", name, sha);
+    Ok(())
 }
