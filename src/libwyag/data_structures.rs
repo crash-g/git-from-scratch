@@ -6,6 +6,11 @@ use std::{
     path::{Path, PathBuf},
     result::Result::Err,
 };
+use flate2::{
+    Compression,
+    read::{ZlibDecoder},
+    write::{ZlibEncoder},
+};
 
 use linked_hash_map::LinkedHashMap;
 use ini::Ini;
@@ -185,6 +190,9 @@ impl GitObject {
         Ok(GitObject::Tag{data: Kvlm::parse_from(data)?})
     }
 
+    /// Serialize the content of the object.
+    ///
+    /// This function is used by `write` to write the object to file.
     pub fn serialize(&self) -> Vec<u8> {
         use GitObject::*;
         match self {
@@ -195,6 +203,7 @@ impl GitObject {
         }
     }
 
+    /// Get the type of the object.
     pub fn get_fmt(&self) -> &'static [u8] {
         use GitObject::*;
         match self {
@@ -203,6 +212,91 @@ impl GitObject {
             Tree{..} => GitObject::TREE_FMT,
             Tag{..} => GitObject::TAG_FMT,
         }
+    }
+
+    /// Read an object from a file, given the file hash.
+    pub fn read(repository: &GitRepository, sha: &Sha1) -> Result<Self> {
+        let file = read_file(repository.gitdir().join("objects").join(&sha[0..2]).join(&sha[2..]))?;
+        let mut zlib_decoder = ZlibDecoder::new(&file);
+        let mut contents = Vec::new();
+        zlib_decoder.read_to_end(&mut contents)
+            .map_err(|_| format!("Cannot decode content of object with hash {}", sha))?;
+
+        let space_position = contents.iter().position(|b| *b == b' ');
+        let null_position = contents.iter().position(|b| *b == b'\x00');
+
+        match (space_position, null_position) {
+            (Some(sp), Some(np)) if np > sp => {
+                let fmt = &contents[0..sp];
+                let size: usize = from_utf8(&contents[sp+1..np])
+                    .map_err(|_| "UTF-8 required".to_string())?
+                    .parse()
+                    .map_err(|_| "Size must be an integer".to_string())?;
+                if size != contents.len() - np - 1 {
+                    Err(format!("The size of the object differs from the declared size, which is {}", size))
+                } else {
+                    GitObject::new(fmt, &contents[np+1..])
+                }
+            }
+            _ => Err(format!("Bad format for object with hash {}", sha))
+        }
+    }
+
+    /// Calculate the hash of an object (the object may not have been written to file yet).
+    pub fn hash(&self) -> Sha1 {
+        let (hash, _) = self.get_hash_and_content();
+        hash
+    }
+
+    /// Write an object to file.
+    pub fn write(&self, repository: &GitRepository) -> Result<Sha1> {
+        let (sha, file_content) = self.get_hash_and_content();
+        let file = create_file(repository.gitdir().join("objects").join(&sha[0..2]).join(&&sha[2..]))?;
+        let mut zlib_encoder = ZlibEncoder::new(file, Compression::default());
+        zlib_encoder.write_all(&file_content).map_err(|_| "Cannot encode object content".to_string())?;
+        zlib_encoder.finish().map_err(|_| "Cannot finilize object write".to_string())?;
+
+        Ok(sha)
+    }
+
+    /// Calculate the hash of this object and the content of the corresponding file.
+    ///
+    /// *Git is fundamentally a content-addressable filesystem*. When an object is
+    /// saved to file, its location is determined by the hash of the file content.
+    ///
+    /// The file content contains the type of object, its serialization and the
+    /// number of bytes in the serialization.
+    fn get_hash_and_content(&self) -> (Sha1, Vec<u8>) {
+        let data = self.serialize();
+
+        let mut result = self.get_fmt().to_vec();
+        result.extend_from_slice(b" ");
+        result.extend_from_slice(data.len().to_string().as_bytes());
+        result.extend_from_slice(b"\x00");
+        result.extend(data);
+
+        (sha1::Sha1::from(&result).hexdigest(), result)
+    }
+}
+
+#[test]
+fn test_blob_write_read() {
+    let base_path = Path::new("target/test");
+    if base_path.exists() {
+        std::fs::remove_dir_all(base_path).unwrap();
+    }
+
+    let test_path = base_path.join("blob");
+    let repository = GitRepository::create(&test_path).unwrap();
+    let git_blob = GitObject::new_blob(b"100".to_vec());
+
+    let sha = git_blob.write(&repository).unwrap();
+    let git_object = GitObject::read(&repository, &sha).unwrap();
+
+    use GitObject::*;
+    match git_object {
+        Blob{data} => assert_eq!(b"100".to_vec(), data),
+        _ => assert!(false)
     }
 }
 
