@@ -29,28 +29,24 @@ pub struct GitRepository {
 }
 
 /// An object in the Git model.
-pub enum GitObject<'a> {
+pub enum GitObject {
     /// `Blob`s are just arrays of bytes.
     Blob {
-        repository: &'a GitRepository,
         data: Vec<u8>,
     },
 
     /// `Commit`s represent commits.
     Commit {
-        repository: &'a GitRepository,
         data: Kvlm,
     },
 
     /// `Tree`s represent the content of the work tree.
     Tree {
-        repository: &'a GitRepository,
         data: Tree,
     },
 
     /// `Tag`s represent tags.
     Tag {
-        repository: &'a GitRepository,
         data: Kvlm,
     },
 }
@@ -152,51 +148,50 @@ impl GitRepository {
     }
 }
 
-impl<'a> GitObject<'a> {
+impl GitObject {
     const BLOB_FMT: &'static [u8] = b"blob";
     const COMMIT_FMT: &'static [u8] = b"commit";
     const TREE_FMT: &'static [u8] = b"tree";
     const TAG_FMT: &'static [u8] = b"tag";
 
-    pub fn new(fmt: &[u8], repository: &'a GitRepository, data: &[u8])
-               -> Result<GitObject<'a>> {
+    pub fn new(fmt: &[u8], data: &[u8]) -> Result<GitObject> {
         if fmt == GitObject::BLOB_FMT {
-            Ok(GitObject::new_blob(repository, data.to_vec()))
+            Ok(GitObject::new_blob(data.to_vec()))
         } else if fmt == GitObject::COMMIT_FMT {
-            GitObject::new_commit(repository, data)
+            GitObject::new_commit(data)
         } else if fmt == GitObject::TREE_FMT {
-            GitObject::new_tree(repository, data)
+            GitObject::new_tree(data)
         } else if fmt == GitObject::TAG_FMT {
-            GitObject::new_tag(repository, data)
+            GitObject::new_tag(data)
         } else {
             Err(format!("The format {} is not supported",
                         from_utf8(fmt).expect("fmt should be UTF-8")))
         }
     }
 
-    pub fn new_blob(repository: &GitRepository, data: Vec<u8>) -> GitObject {
-        GitObject::Blob{repository, data}
+    pub fn new_blob(data: Vec<u8>) -> GitObject {
+        GitObject::Blob{data}
     }
 
-    pub fn new_commit(repository: &'a GitRepository, data: &[u8]) -> Result<GitObject<'a>> {
-        Ok(GitObject::Commit{repository, data: Kvlm::parse_from(data)?})
+    pub fn new_commit(data: &[u8]) -> Result<GitObject> {
+        Ok(GitObject::Commit{data: Kvlm::parse_from(data)?})
     }
 
-    pub fn new_tree(repository: &'a GitRepository, data: &[u8]) -> Result<GitObject<'a>> {
-        Ok(GitObject::Tree{repository, data: Tree::parse_from(&data)?})
+    pub fn new_tree(data: &[u8]) -> Result<GitObject> {
+        Ok(GitObject::Tree{data: Tree::parse_from(&data)?})
     }
 
-    pub fn new_tag(repository: &'a GitRepository, data: &[u8]) -> Result<GitObject<'a>> {
-        Ok(GitObject::Tag{repository, data: Kvlm::parse_from(data)?})
+    pub fn new_tag(data: &[u8]) -> Result<GitObject> {
+        Ok(GitObject::Tag{data: Kvlm::parse_from(data)?})
     }
 
     pub fn serialize(&self) -> Vec<u8> {
         use GitObject::*;
         match self {
-            Blob{repository: _, data} => data.to_vec(),
-            Commit{repository: _, data} => data.serialize(),
-            Tree{repository: _, data} => data.serialize(),
-            Tag{repository: _, data} => data.serialize(),
+            Blob{data} => data.to_vec(),
+            Commit{data} => data.serialize(),
+            Tree{data} => data.serialize(),
+            Tag{data} => data.serialize(),
         }
     }
 
@@ -207,16 +202,6 @@ impl<'a> GitObject<'a> {
             Commit{..} => GitObject::COMMIT_FMT,
             Tree{..} => GitObject::TREE_FMT,
             Tag{..} => GitObject::TAG_FMT,
-        }
-    }
-
-    pub fn get_repository(&self) -> &GitRepository {
-        use GitObject::*;
-        match self {
-            Blob{repository, data: _} => repository,
-            Commit{repository, data: _} => repository,
-            Tree{repository, data: _} => repository,
-            Tag{repository, data: _} => repository,
         }
     }
 }

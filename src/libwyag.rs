@@ -46,8 +46,12 @@ pub fn cat_file(repository: &GitRepository, fmt: &str, sha: &Sha1) -> Result<Vec
 pub fn hash_object<P: AsRef<Path>>(file_path: P, fmt: &str, actually_write: bool) -> Result<Sha1> {
     let repository = find_repository_required(&file_path)?;
     let data = read_file_content(repository.gitdir().join(file_path))?;
-    let object = GitObject::new(fmt.as_bytes(), &repository, &data)?;
-    write_object(&object, actually_write)
+    let object = GitObject::new(fmt.as_bytes(), &data)?;
+    if actually_write {
+        write_object(&repository, &object)
+    } else {
+        Ok(hash_object_impl(&object))
+    }
 }
 
 //////////// log //////////////
@@ -68,7 +72,7 @@ fn make_graphviz_string(repository: &GitRepository, sha: &Sha1, seen: &mut HashS
 
     let commit = read_object(repository, sha)?;
     match commit {
-        GitObject::Commit{repository, data} => {
+        GitObject::Commit{data} => {
             match data.get("parent") {
                 None => Ok("".to_string()),
                 Some(parents) => {
@@ -95,7 +99,7 @@ pub fn ls_tree(repository: &GitRepository, sha: &Sha1) -> Result<String> {
     let tree = read_object(&repository, &sha)?;
 
     match tree {
-        GitObject::Tree{repository, data} => {
+        GitObject::Tree{data} => {
             let mut result = String::new();
             for leaf in data.get_leaves() {
                 let fmt = read_object(repository, leaf.sha())?.get_fmt();
@@ -119,8 +123,8 @@ pub fn checkout_tree<P: AsRef<Path>>(repository: &GitRepository, sha: &Sha1, pat
     let object = read_object(&repository, &sha)?;
 
     let tree = match object {
-        GitObject::Tree{repository: _, data} => data,
-        GitObject::Commit{repository: _, data} => {
+        GitObject::Tree{data} => data,
+        GitObject::Commit{data} => {
             let tree_hash = match data.get("tree") {
                 Some(vec) if vec.len() == 1 => {
                     from_utf8(vec.get(0).unwrap())
@@ -130,7 +134,7 @@ pub fn checkout_tree<P: AsRef<Path>>(repository: &GitRepository, sha: &Sha1, pat
                 _ => return Err(format!("Too many trees for commit {}", sha)),
             };
             match read_object(&repository, &tree_hash.to_string())? {
-                GitObject::Tree{repository: _, data} => data,
+                GitObject::Tree{data} => data,
                 _ => return Err(format!("The commit tree has an invalid hash")),
             }
         },
@@ -151,11 +155,11 @@ fn checkout_tree_impl<P: AsRef<Path>>(repository: &GitRepository,
         let dest = path.as_ref().join(&leaf.path());
 
         match object {
-            GitObject::Tree{repository: _, data} => {
+            GitObject::Tree{data} => {
                 create_directory(&dest)?;
                 checkout_tree_impl(&repository, &data, dest)?;
             },
-            GitObject::Blob{repository: _, data} => {
+            GitObject::Blob{data} => {
                 let mut file = create_file(&dest)?;
                 file.write_all(&data)
                     .map_err(|_| format!("Cannot write to file {:?}", dest))?;
@@ -196,9 +200,9 @@ tag {}
 tagger unknown
 
 This is the message and should have come from the user", sha, name);;
-    let tag = GitObject::new_tag(&repository, tag_data.as_bytes())?;
+    let tag = GitObject::new_tag(tag_data.as_bytes())?;
 
-    let sha = write_object(&tag, true)?;
+    let sha = write_object(repository, &tag)?;
     create_reference(&repository, Path::new("tags").join(name), &sha)?;
     Ok(())
 }
@@ -216,14 +220,14 @@ pub fn find_object_of_type(repository: &GitRepository, sha: &Sha1, fmt: &str, fo
     }
 
     let parsed_element = match object {
-        GitObject::Tag{repository: _, data} => {
+        GitObject::Tag{data} => {
             data.get("object")
                 .ok_or(format!("Cannot find 'object' section in tag {}", sha))
                 .map(|section| section.get(0)
                      .expect(&format!("Section 'object' in tag {} is empty", sha)))?
                 .to_vec()
         }
-        GitObject::Commit{repository: _, data} => {
+        GitObject::Commit{data} => {
             data.get("tree")
                 .ok_or(format!("Cannot find 'tree' section in commit {}", sha))
                 .map(|section| section.get(0)
@@ -274,7 +278,7 @@ fn resolve_object(repository: &GitRepository, name: &str) -> Result<Sha1> {
     Err(format!("{} cannot be resolved to a hash", name))
 }
 
-fn read_object<'a>(repository: &'a GitRepository, sha: &Sha1) -> Result<GitObject<'a>> {
+fn read_object(repository: &GitRepository, sha: &Sha1) -> Result<GitObject> {
     let file = read_file(repository.gitdir().join("objects").join(&sha[0..2]).join(&sha[2..]))?;
     let mut zlib_decoder = ZlibDecoder::new(&file);
     let mut contents = Vec::new();
@@ -294,14 +298,27 @@ fn read_object<'a>(repository: &'a GitRepository, sha: &Sha1) -> Result<GitObjec
             if size != contents.len() - np - 1 {
                 Err(format!("The size of the object differs from the declared size, which is {}", size))
             } else {
-                GitObject::new(fmt, repository, &contents[np+1..])
+                GitObject::new(fmt, &contents[np+1..])
             }
         }
         _ => Err(format!("Bad format for object with hash {}", sha))
     }
 }
 
-fn write_object(object: &GitObject, actually_write: bool) -> Result<Sha1> {
+// TODO refactor to reuse logic in hash_object_impl and write_object
+fn hash_object_impl(object: &GitObject) -> Sha1 {
+    let data = object.serialize();
+
+    let mut result = object.get_fmt().to_vec();
+    result.extend_from_slice(b" ");
+    result.extend_from_slice(data.len().to_string().as_bytes());
+    result.extend_from_slice(b"\x00");
+    result.extend(data);
+
+    sha1::Sha1::from(&result).hexdigest()
+}
+
+fn write_object(repository: &GitRepository, object: &GitObject) -> Result<Sha1> {
     let data = object.serialize();
 
     let mut result = object.get_fmt().to_vec();
@@ -312,12 +329,11 @@ fn write_object(object: &GitObject, actually_write: bool) -> Result<Sha1> {
 
     let sha = sha1::Sha1::from(&result).hexdigest();
 
-    if actually_write {
-        let file = create_file(object.get_repository().gitdir().join("objects").join(&sha[0..2]).join(&&sha[2..]))?;
-        let mut zlib_encoder = ZlibEncoder::new(file, Compression::default());
-        zlib_encoder.write_all(&result).map_err(|_| "Cannot encode object content".to_string())?;
-        zlib_encoder.finish().map_err(|_| "Cannot finilize object write".to_string())?;
-    }
+    let file = create_file(repository.gitdir().join("objects").join(&sha[0..2]).join(&&sha[2..]))?;
+    let mut zlib_encoder = ZlibEncoder::new(file, Compression::default());
+    zlib_encoder.write_all(&result).map_err(|_| "Cannot encode object content".to_string())?;
+    zlib_encoder.finish().map_err(|_| "Cannot finilize object write".to_string())?;
+
     Ok(sha)
 }
 
@@ -329,15 +345,15 @@ fn test_blob_write_read() {
     }
 
     let test_path = base_path.join("blob");
-    let repository = create_repository(&test_path).unwrap();
-    let git_blob = GitObject::new_blob(&repository, b"100".to_vec());
+    let repository = GitRepository::create(&test_path).unwrap();
+    let git_blob = GitObject::new_blob(b"100".to_vec());
 
-    let sha = write_object(&git_blob, true).unwrap();
+    let sha = write_object(&repository, &git_blob).unwrap();
     let git_object = read_object(&repository, &sha).unwrap();
 
     use GitObject::*;
     match git_object {
-        Blob{repository: _, data} => assert_eq!(b"100".to_vec(), data),
+        Blob{data} => assert_eq!(b"100".to_vec(), data),
         _ => assert!(false)
     }
 }
