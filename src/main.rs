@@ -127,7 +127,7 @@ fn main() -> Result<()> {
 
 fn init(path: PathBuf) -> Result<()> {
     println!("Creating repository at {:?}", path);
-    libwyag::create_repository(&path)?;
+    libwyag::init(&path)?;
     Ok(())
 }
 
