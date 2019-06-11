@@ -202,7 +202,7 @@ This is the message and should have come from the user", sha, name);;
     Ok(())
 }
 
-//////////// read/write/search //////////////
+//////////// search //////////////
 
 pub fn find_object_of_type(repository: &GitRepository, sha: &Sha1, fmt: &str, follow: bool) -> Result<Sha1> {
     let sha = resolve_object(repository, sha)?;

@@ -1,4 +1,7 @@
 //! Data structure and trait definitions.
+//!
+//! The main object is `GitObject`, which models a generic object
+//! in Git domain (commits, tags, blobs, trees).
 
 use std::{
     str::from_utf8,
@@ -34,6 +37,13 @@ pub struct GitRepository {
 }
 
 /// An object in the Git model.
+///
+/// Objects can be serialized and deserialized, and the serialization
+/// can be written to file, following some internal logic (see
+/// [get_hash_and_content](#method.get_hash_and_content)).
+///
+/// `Blob`s are trivial to serialize, while `Commit`s, `Tree`s and `Tag`s
+/// follow some specific syntax.
 pub enum GitObject {
     /// `Blob`s are just arrays of bytes.
     Blob {
@@ -279,15 +289,23 @@ impl GitObject {
     }
 }
 
-#[test]
-fn test_blob_write_read() {
-    let base_path = Path::new("target/test");
+// TODO test module
+fn test_init_repository(path: &str) -> GitRepository {
+    test_delete_all(path);
+    GitRepository::create(path).unwrap()
+}
+
+fn test_delete_all(path: &str) {
+    let base_path = Path::new(path);
     if base_path.exists() {
         std::fs::remove_dir_all(base_path).unwrap();
     }
+}
 
-    let test_path = base_path.join("blob");
-    let repository = GitRepository::create(&test_path).unwrap();
+#[test]
+fn test_blob_write_read() {
+    let test_path = "/tmp/rust/git/test/blob";
+    let repository = test_init_repository(test_path);
     let git_blob = GitObject::new_blob(b"100".to_vec());
 
     let sha = git_blob.write(&repository).unwrap();
@@ -298,6 +316,7 @@ fn test_blob_write_read() {
         Blob{data} => assert_eq!(b"100".to_vec(), data),
         _ => assert!(false)
     }
+    test_delete_all(test_path);
 }
 
 impl Kvlm {
@@ -305,6 +324,10 @@ impl Kvlm {
         self.data.get(key)
     }
 
+    /// Serialize this `Kvlm`.
+    ///
+    /// First serialize all key-value pairs (no specific order is required),
+    /// then serialize the message
     fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
 
@@ -319,7 +342,7 @@ impl Kvlm {
                 result.push(b'\n');
             }
         }
-        let message = self.data.get("").expect("Message not found (TODO)");
+        let message = self.data.get("").expect("The message is compulsory, but is missing");
         assert_eq!(1, message.len(), "There must be exactly one message");
         let message = &message[0];
         result.push(b'\n');
@@ -333,13 +356,23 @@ impl Kvlm {
         Ok(kvlm)
     }
 
+    /// Recursively parse a `Kvlm` from an array of bytes.
+    ///
+    /// Each call to this function parses one key and one value
+    /// (or the message, if nothing else is left).
+    ///
+    /// ## Syntax rules:
+    /// Keys and values are separated by a space. A value may span multiple lines,
+    /// but each subsequent line must start with a space. Keys may be repeated.
+    /// The first empty new line marks the start of the message, which continues until
+    /// the end (the message is associated to the empty key).
     fn parse(&mut self, raw: &[u8]) -> Result<()> {
         let space_position = raw.iter().position(|b| *b == b' ');
         let newline_position = raw.iter().position(|b| *b == b'\n');
 
         match (space_position, newline_position) {
             (_, Some(np)) if np == 0 => {
-                // parse message (which is right after a newline)
+                // found an empty new line, so we parse the message now
                 self.data.insert("".to_string(), vec![raw[np + 1..].to_vec()]);
                 Ok(())
             }
@@ -358,6 +391,7 @@ impl Kvlm {
         }
     }
 
+    /// Insert a value inside the key-value list.
     fn insert(&mut self, key: &str, value: Vec<u8>) {
         match self.data.get_mut(key) {
             None => {
@@ -369,6 +403,10 @@ impl Kvlm {
         }
     }
 
+    /// Parse a value starting at the beginning of `raw`.
+    ///
+    /// A value may span multiple lines, but each subsequent line must start
+    /// with a space. These spaces are trimmed while parsing.
     fn parse_next_value(raw: &[u8]) -> (&[u8], usize) {
         let mut to_skip = 0;
         while let Some(np) = raw.iter().skip(to_skip).position(|b| *b == b'\n') {
@@ -441,6 +479,7 @@ impl Tree {
         &self.data
     }
 
+    /// Serialize this `Tree`.
     fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
 
@@ -455,6 +494,7 @@ impl Tree {
         result
     }
 
+    /// Parse a `Tree` from an array of bytes.
     fn parse_from(raw: &[u8]) -> Result<Self> {
         let mut leaves = Vec::new();
         let mut start = 0;
@@ -467,6 +507,12 @@ impl Tree {
         Ok(Tree{data: leaves})
     }
 
+    /// Parse a "leaf" from an array of bytes.
+    ///
+    /// Each leaf contains a set of permissions, a path and
+    /// the binary representation of a hash. Permissions and
+    /// path are separated by a space, path and hash by
+    /// a null byte (`\x00`).
     fn parse_leaf(raw: &[u8]) -> Result<(GitTreeLeaf, usize)> {
         let space_position = raw.iter().position(|b| *b == b' ');
         let null_position = raw.iter().position(|b| *b == b'\x00');

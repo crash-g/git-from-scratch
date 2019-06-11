@@ -10,6 +10,7 @@ use std::{
 
 use super::Result;
 
+/// Replace `from` with `to` in `source`.
 pub fn replace<T>(source: &[T], from: &[T], to: &[T]) -> Vec<T>
 where
     T: Clone + PartialEq
