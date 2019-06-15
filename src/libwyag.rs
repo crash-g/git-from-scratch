@@ -6,6 +6,8 @@ use std::{
     collections::HashSet,
 };
 
+use log::debug;
+use lazy_static::lazy_static;
 use linked_hash_map::LinkedHashMap;
 use regex::Regex;
 
@@ -170,7 +172,7 @@ fn checkout_tree_impl<P: AsRef<Path>>(repository: &GitRepository,
 pub fn show_references<P: AsRef<Path>>(repository: &GitRepository, custom_full_path: Option<P>) -> Result<()> {
     let references = list_references(&repository, custom_full_path)?;
     for (path, hash) in references {
-        println!("{:?} -> {}", path, hash);
+        println!("{:?} -> {}", path, hash); // TODO
     }
     Ok(())
 }
@@ -333,9 +335,9 @@ fn create_reference<P: AsRef<Path>>(repository: &GitRepository, reference: P, sh
 /// or in one of its parents.
 pub fn find_repository<P: AsRef<Path>>(path: P) -> Option<Result<GitRepository>> {
     for ancestor in path.as_ref().ancestors() {
-        println!("Checking {:?}", ancestor);
+        debug!("Checking {:?}", ancestor);
         if ancestor.join(GIT_PRIVATE_FOLDER).is_dir() {
-            println!("Found .git in {:?}", ancestor);
+            debug!("Found .git in {:?}", ancestor);
             return Some(GitRepository::read(ancestor));
         }
     }

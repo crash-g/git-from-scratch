@@ -289,36 +289,6 @@ impl GitObject {
     }
 }
 
-// TODO test module
-fn test_init_repository(path: &str) -> GitRepository {
-    test_delete_all(path);
-    GitRepository::create(path).unwrap()
-}
-
-fn test_delete_all(path: &str) {
-    let base_path = Path::new(path);
-    if base_path.exists() {
-        std::fs::remove_dir_all(base_path).unwrap();
-    }
-}
-
-#[test]
-fn test_blob_write_read() {
-    let test_path = "/tmp/rust/git/test/blob";
-    let repository = test_init_repository(test_path);
-    let git_blob = GitObject::new_blob(b"100".to_vec());
-
-    let sha = git_blob.write(&repository).unwrap();
-    let git_object = GitObject::read(&repository, &sha).unwrap();
-
-    use GitObject::*;
-    match git_object {
-        Blob{data} => assert_eq!(b"100".to_vec(), data),
-        _ => assert!(false)
-    }
-    test_delete_all(test_path);
-}
-
 impl Kvlm {
     pub fn get(&self, key: &str) -> Option<&Vec<Vec<u8>>> {
         self.data.get(key)
@@ -421,59 +391,6 @@ impl Kvlm {
 
 }
 
-#[test]
-fn test_parse_kvlm() {
-    let raw = b"tree 29ff16c9c14e2652b22f8b78bb08a5a07930c147
-parent 206941306e8a8af65b66eaaaea388a7ae24d49a0
-author Thibault Polge <thibault@thb.lt> 1527025023 +0200
-committer Thibault Polge <thibault@thb.lt> 1527025044 +0200
-gpgsig -----BEGIN PGP SIGNATURE-----
- -----END PGP SIGNATURE-----
-committer another
-
-Create first draft";
-
-    let dict = Kvlm::parse_from(raw).unwrap();
-    assert_eq!("29ff16c9c14e2652b22f8b78bb08a5a07930c147",
-               from_utf8(&dict.data.get("tree").unwrap()[0]).unwrap());
-    assert_eq!("206941306e8a8af65b66eaaaea388a7ae24d49a0",
-               from_utf8(&dict.data.get("parent").unwrap()[0]).unwrap());
-    assert_eq!("Thibault Polge <thibault@thb.lt> 1527025023 +0200",
-               from_utf8(&dict.data.get("author").unwrap()[0]).unwrap());
-    assert_eq!("Thibault Polge <thibault@thb.lt> 1527025044 +0200",
-               from_utf8(&dict.data.get("committer").unwrap()[0]).unwrap());
-    assert_eq!("another",
-               from_utf8(&dict.data.get("committer").unwrap()[1]).unwrap());
-    assert_eq!("-----BEGIN PGP SIGNATURE-----\n-----END PGP SIGNATURE-----",
-               from_utf8(&dict.data.get("gpgsig").unwrap()[0]).unwrap());
-    assert_eq!("Create first draft", from_utf8(&dict.data.get("").unwrap()[0]).unwrap());
-
-    let raw = b"\n";
-    let dict = Kvlm::parse_from(raw).unwrap();
-    assert_eq!("", from_utf8(&dict.data.get("").unwrap()[0]).unwrap());
-
-    let raw = b"";
-    let dict = Kvlm::parse_from(raw);
-    assert!(dict.is_err());
-}
-
-#[test]
-fn test_parse_and_serialize_kvlm() {
-    let raw = b"tree 29ff16c9c14e2652b22f8b78bb08a5a07930c147
-parent 206941306e8a8af65b66eaaaea388a7ae24d49a0
-author Thibault Polge <thibault@thb.lt> 1527025023 +0200
-committer Thibault Polge <thibault@thb.lt> 1527025044 +0200
-committer another
-gpgsig -----BEGIN PGP SIGNATURE-----
- -----END PGP SIGNATURE-----
-
-Create first draft";
-
-    let dict = Kvlm::parse_from(raw).unwrap();
-    let serialized_raw = dict.serialize();
-    assert_eq!(from_utf8(raw).unwrap(), from_utf8(&serialized_raw).unwrap());
-}
-
 impl Tree {
     pub fn get_leaves(&self) -> &Vec<GitTreeLeaf> {
         &self.data
@@ -551,34 +468,122 @@ impl GitTreeLeaf {
     }
 }
 
-#[test]
-fn test_parse_tree() {
-    let raw = b"100644 .gitignore\x00\x89JD\xcc\x06j\x02te\xcd&\xd64\x94\x8dV\xd1:\xf9\xaf\
-                100633 LICENSE\x00\x94\xa9\xed\x02M8Yy6\x18\x15.\xa5Y\xa1h\xbb\xcb\xb5\xe2\
-                80711 README.md\x00\xba\xb4\x89\xc4\xf4`\n8\xcem\xbf\xd6R\xb9\x03\x83\xa4\xaa>E";
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let tree = Tree::parse_from(raw).unwrap();
-    assert_eq!(100644, tree.data[0].mode);
-    assert_eq!(".gitignore", tree.data[0].path);
-    assert_eq!("894a44cc066a027465cd26d634948d56d13af9af", tree.data[0].sha);
+    fn test_init_repository(path: &str) -> GitRepository {
+        test_delete_all(path);
+        GitRepository::create(path).unwrap()
+    }
 
-    assert_eq!(100633, tree.data[1].mode);
-    assert_eq!("LICENSE", tree.data[1].path);
-    assert_eq!("94a9ed024d3859793618152ea559a168bbcbb5e2", tree.data[1].sha);
+    fn test_delete_all(path: &str) {
+        let base_path = Path::new(path);
+        if base_path.exists() {
+            std::fs::remove_dir_all(base_path).unwrap();
+        }
+    }
 
-    assert_eq!(80711, tree.data[2].mode);
-    assert_eq!("README.md", tree.data[2].path);
-    assert_eq!("bab489c4f4600a38ce6dbfd652b90383a4aa3e45", tree.data[2].sha);
-}
+    #[test]
+    fn test_blob_write_read() {
+        let test_path = "/tmp/rust/git/test/blob";
+        let repository = test_init_repository(test_path);
+        let git_blob = GitObject::new_blob(b"100".to_vec());
+
+        let sha = git_blob.write(&repository).unwrap();
+        let git_object = GitObject::read(&repository, &sha).unwrap();
+
+        use GitObject::*;
+        match git_object {
+            Blob{data} => assert_eq!(b"100".to_vec(), data),
+            _ => assert!(false)
+        }
+        test_delete_all(test_path);
+    }
+
+    #[test]
+    fn test_parse_kvlm() {
+        let raw = b"tree 29ff16c9c14e2652b22f8b78bb08a5a07930c147
+parent 206941306e8a8af65b66eaaaea388a7ae24d49a0
+author Thibault Polge <thibault@thb.lt> 1527025023 +0200
+committer Thibault Polge <thibault@thb.lt> 1527025044 +0200
+gpgsig -----BEGIN PGP SIGNATURE-----
+ -----END PGP SIGNATURE-----
+committer another
+
+Create first draft";
+
+        let dict = Kvlm::parse_from(raw).unwrap();
+        assert_eq!("29ff16c9c14e2652b22f8b78bb08a5a07930c147",
+                   from_utf8(&dict.data.get("tree").unwrap()[0]).unwrap());
+        assert_eq!("206941306e8a8af65b66eaaaea388a7ae24d49a0",
+                   from_utf8(&dict.data.get("parent").unwrap()[0]).unwrap());
+        assert_eq!("Thibault Polge <thibault@thb.lt> 1527025023 +0200",
+                   from_utf8(&dict.data.get("author").unwrap()[0]).unwrap());
+        assert_eq!("Thibault Polge <thibault@thb.lt> 1527025044 +0200",
+                   from_utf8(&dict.data.get("committer").unwrap()[0]).unwrap());
+        assert_eq!("another",
+                   from_utf8(&dict.data.get("committer").unwrap()[1]).unwrap());
+        assert_eq!("-----BEGIN PGP SIGNATURE-----\n-----END PGP SIGNATURE-----",
+                   from_utf8(&dict.data.get("gpgsig").unwrap()[0]).unwrap());
+        assert_eq!("Create first draft", from_utf8(&dict.data.get("").unwrap()[0]).unwrap());
+
+        let raw = b"\n";
+        let dict = Kvlm::parse_from(raw).unwrap();
+        assert_eq!("", from_utf8(&dict.data.get("").unwrap()[0]).unwrap());
+
+        let raw = b"";
+        let dict = Kvlm::parse_from(raw);
+        assert!(dict.is_err());
+    }
+
+    #[test]
+    fn test_parse_and_serialize_kvlm() {
+        let raw = b"tree 29ff16c9c14e2652b22f8b78bb08a5a07930c147
+parent 206941306e8a8af65b66eaaaea388a7ae24d49a0
+author Thibault Polge <thibault@thb.lt> 1527025023 +0200
+committer Thibault Polge <thibault@thb.lt> 1527025044 +0200
+committer another
+gpgsig -----BEGIN PGP SIGNATURE-----
+ -----END PGP SIGNATURE-----
+
+Create first draft";
+
+        let dict = Kvlm::parse_from(raw).unwrap();
+        let serialized_raw = dict.serialize();
+        assert_eq!(from_utf8(raw).unwrap(), from_utf8(&serialized_raw).unwrap());
+    }
+
+    #[test]
+    fn test_parse_tree() {
+        let raw = b"100644 .gitignore\x00\x89JD\xcc\x06j\x02te\xcd&\xd64\x94\x8dV\xd1:\xf9\xaf\
+                    100633 LICENSE\x00\x94\xa9\xed\x02M8Yy6\x18\x15.\xa5Y\xa1h\xbb\xcb\xb5\xe2\
+                    80711 README.md\x00\xba\xb4\x89\xc4\xf4`\n8\xcem\xbf\xd6R\xb9\x03\x83\xa4\xaa>E";
+
+        let tree = Tree::parse_from(raw).unwrap();
+        assert_eq!(100644, tree.data[0].mode);
+        assert_eq!(".gitignore", tree.data[0].path);
+        assert_eq!("894a44cc066a027465cd26d634948d56d13af9af", tree.data[0].sha);
+
+        assert_eq!(100633, tree.data[1].mode);
+        assert_eq!("LICENSE", tree.data[1].path);
+        assert_eq!("94a9ed024d3859793618152ea559a168bbcbb5e2", tree.data[1].sha);
+
+        assert_eq!(80711, tree.data[2].mode);
+        assert_eq!("README.md", tree.data[2].path);
+        assert_eq!("bab489c4f4600a38ce6dbfd652b90383a4aa3e45", tree.data[2].sha);
+    }
 
 
-#[test]
-fn test_parse_and_serialize_tree() {
-    let raw = b"100644 .gitignore\x00\x89JD\xcc\x06j\x02te\xcd&\xd64\x94\x8dV\xd1:\xf9\xaf\
-                100633 LICENSE\x00\x94\xa9\xed\x02M8Yy6\x18\x15.\xa5Y\xa1h\xbb\xcb\xb5\xe2\
-                80711 README.md\x00\xba\xb4\x89\xc4\xf4`\n8\xcem\xbf\xd6R\xb9\x03\x83\xa4\xaa>E";
+    #[test]
+    fn test_parse_and_serialize_tree() {
+        let raw = b"100644 .gitignore\x00\x89JD\xcc\x06j\x02te\xcd&\xd64\x94\x8dV\xd1:\xf9\xaf\
+                    100633 LICENSE\x00\x94\xa9\xed\x02M8Yy6\x18\x15.\xa5Y\xa1h\xbb\xcb\xb5\xe2\
+                    80711 README.md\x00\xba\xb4\x89\xc4\xf4`\n8\xcem\xbf\xd6R\xb9\x03\x83\xa4\xaa>E";
 
-    let tree = Tree::parse_from(raw).unwrap();
-    let serialized_raw = tree.serialize();
-    assert_eq!(raw.to_vec(), serialized_raw);
+        let tree = Tree::parse_from(raw).unwrap();
+        let serialized_raw = tree.serialize();
+        assert_eq!(raw.to_vec(), serialized_raw);
+    }
+
 }

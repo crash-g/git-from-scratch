@@ -1,5 +1,6 @@
-#[macro_use] extern crate lazy_static;
+#![deny(rust_2018_idioms)]
 
+use log::{info, debug, error};
 use structopt::StructOpt;
 use std::path::PathBuf;
 
@@ -91,17 +92,16 @@ enum Command {
         /// The type of the object
         fmt: String,
     },
-
-    #[structopt(name = "add")]
-    /// Add files
-    Add,
 }
 
-fn main() -> Result<()> {
+fn main() {
+    simple_logger::init_with_level(log::Level::Debug).unwrap();
+
     let opt = Command::from_args();
-    println!("{:?}", opt);
+    info!("{:?}", opt);
+
     use Command::*;
-    match opt {
+    let outcome = match opt {
         Init{path} => init(path),
         CatFile{fmt, hash} => cat_file(fmt, hash),
         HashObject{file_path, fmt, actually_write} =>
@@ -118,21 +118,20 @@ fn main() -> Result<()> {
             }
         }
         RevParse{name, fmt} => rev_parse(name, fmt),
-        Add => {
-            println!("TODO");
-            Ok(())
-        },
+    };
+    if let Err(e) = outcome {
+        error!("An error occurred: {}", e);
     }
 }
 
 fn init(path: PathBuf) -> Result<()> {
-    println!("Creating repository at {:?}", path);
+    debug!("Creating repository at {:?}", path);
     libwyag::init(&path)?;
     Ok(())
 }
 
 fn cat_file(fmt: String, sha: libwyag::Sha1) -> Result<()> {
-    println!("cat-file {}", &sha);
+    debug!("cat-file {}", &sha);
 
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
@@ -148,14 +147,14 @@ fn cat_file(fmt: String, sha: libwyag::Sha1) -> Result<()> {
 }
 
 fn hash_object(file_path: PathBuf, fmt: String, actually_write: bool) -> Result<()> {
-    println!("hash-object {:?}", file_path);
+    debug!("hash-object {:?}", file_path);
     let sha = libwyag::hash_object(file_path, &fmt, actually_write)?;
     println!("Calculated hash is {}", sha);
     Ok(())
 }
 
 fn log(commit: Option<libwyag::Sha1>) -> Result<()> {
-    println!("log {:?}", commit);
+    debug!("log {:?}", commit);
     if let Some(c) = commit {
         let current_directory = std::env::current_dir()
             .map_err(|_| "Cannot determine current directory".to_string())?;
@@ -167,7 +166,7 @@ fn log(commit: Option<libwyag::Sha1>) -> Result<()> {
 }
 
 fn ls_tree(hash: libwyag::Sha1) -> Result<()> {
-    println!("ls-tree {}", &hash);
+    debug!("ls-tree {}", &hash);
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
     let repository = libwyag::find_repository_required(current_directory)?;
@@ -177,7 +176,7 @@ fn ls_tree(hash: libwyag::Sha1) -> Result<()> {
 }
 
 fn checkout(hash: libwyag::Sha1, path: PathBuf) -> Result<()> {
-    println!("checkout {} to {:?}", &hash, path);
+    debug!("checkout {} to {:?}", &hash, path);
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
     let repository = libwyag::find_repository_required(current_directory)?;
@@ -185,7 +184,7 @@ fn checkout(hash: libwyag::Sha1, path: PathBuf) -> Result<()> {
 }
 
 fn show_references() -> Result<()> {
-    println!("show-ref");
+    debug!("show-ref");
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
     let repository = libwyag::find_repository_required(current_directory)?;
@@ -194,7 +193,7 @@ fn show_references() -> Result<()> {
 }
 
 fn list_tags() -> Result<()> {
-    println!("tag");
+    debug!("tag");
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
     let repository = libwyag::find_repository_required(current_directory)?;
@@ -203,7 +202,7 @@ fn list_tags() -> Result<()> {
 }
 
 fn add_tag(name: String, object: Option<libwyag::Sha1>, add_tag_object: bool) -> Result<()> {
-    println!("tag with name {} pointing to {:?}", name, object);
+    debug!("tag with name {} pointing to {:?}", name, object);
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
     let repository = libwyag::find_repository_required(current_directory)?;
@@ -216,7 +215,7 @@ fn add_tag(name: String, object: Option<libwyag::Sha1>, add_tag_object: bool) ->
 }
 
 fn rev_parse(name: String, fmt: String) -> Result<()> {
-    println!("rev-parse");
+    debug!("rev-parse");
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
     let repository = libwyag::find_repository_required(current_directory)?;

@@ -8,6 +8,7 @@ use std::{
     result::Result::Err,
 };
 
+use log::debug;
 use super::Result;
 
 /// Replace `from` with `to` in `source`.
@@ -52,7 +53,7 @@ pub fn create_directory<P: AsRef<Path>>(path: P) -> Result<()> {
             Err(format!("{:?} is not a directory", path))
         }
     } else {
-        println!("Creating directory {:?}", path);
+        debug!("Creating directory {:?}", path);
         fs::create_dir_all(&path)
             .map_err(|_| format!("Cannot create {:?} directory", path))?;
         Ok(())
