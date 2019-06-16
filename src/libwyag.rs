@@ -1,14 +1,18 @@
+//! Implementation of the main functionalities.
+//!
+//! Git handles objects and references. For a description of the
+//! objects, see the module `data_structures`. For a description of
+//! references see the module `references`.
+
 use std::{
     str::from_utf8,
     io::prelude::*,
-    path::{Path, PathBuf},
+    path::Path,
     result::Result::Err,
     collections::HashSet,
 };
 
-use log::debug;
 use lazy_static::lazy_static;
-use linked_hash_map::LinkedHashMap;
 use regex::Regex;
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -22,26 +26,25 @@ use utils::*;
 
 mod data_structures;
 use data_structures::*;
+pub use data_structures::GitRepository;
 
-//////////// init //////////////
+mod references;
+use references::*;
 
+/// Initialize a repository at the given path.
 pub fn init<P: AsRef<Path>>(path: P) -> Result<()> {
     GitRepository::create(path)?;
     Ok(())
 }
 
-//////////// cat-file //////////////
-
 pub fn cat_file(repository: &GitRepository, fmt: &str, sha: &Sha1) -> Result<Vec<u8>> {
-    let sha = find_object_of_type(&repository, &sha, fmt, false)?;
+    let sha = resolve_object_by_type(&repository, &sha, fmt)?;
     let git_object = GitObject::read(&repository, &sha)?;
     Ok(git_object.serialize())
 }
 
-//////////// hash-object //////////////
-
 pub fn hash_object<P: AsRef<Path>>(file_path: P, fmt: &str, actually_write: bool) -> Result<Sha1> {
-    let repository = find_repository_required(&file_path)?;
+    let repository = GitRepository::find_repository_required(&file_path)?;
     let data = read_file_content(repository.gitdir().join(file_path))?;
     let object = GitObject::new(fmt.as_bytes(), &data)?;
     if actually_write {
@@ -51,10 +54,8 @@ pub fn hash_object<P: AsRef<Path>>(file_path: P, fmt: &str, actually_write: bool
     }
 }
 
-//////////// log //////////////
-
 pub fn log<P: AsRef<Path>>(file_path: P, sha: &Sha1) -> Result<String> {
-    let repository = find_repository_required(&file_path)?;
+    let repository = GitRepository::find_repository_required(&file_path)?;
     let mut result = "digraph wyaglog{".to_string();
     let mut seen = HashSet::new();
     result += &make_graphviz_string(&repository, sha, &mut seen)?;
@@ -92,7 +93,7 @@ fn make_graphviz_string(repository: &GitRepository, sha: &Sha1, seen: &mut HashS
 //////////// ls-tree //////////////
 
 pub fn ls_tree(repository: &GitRepository, sha: &Sha1) -> Result<String> {
-    let sha = find_object(&repository, &sha)?;
+    let sha = resolve_object(&repository, &sha)?;
     let tree = GitObject::read(&repository, &sha)?;
 
     match tree {
@@ -116,7 +117,7 @@ pub fn ls_tree(repository: &GitRepository, sha: &Sha1) -> Result<String> {
 //////////// checkout tree //////////////
 
 pub fn checkout_tree<P: AsRef<Path>>(repository: &GitRepository, sha: &Sha1, path: P) -> Result<()> {
-    let sha = find_object(&repository, &sha)?;
+    let sha = resolve_object(&repository, &sha)?;
     let object = GitObject::read(&repository, &sha)?;
 
     let tree = match object {
@@ -181,14 +182,14 @@ pub fn show_references<P: AsRef<Path>>(repository: &GitRepository, custom_full_p
 
 /// Create a "lightweight" reference to a commit, tree or blob
 pub fn create_tag(repository: &GitRepository, name: &str, reference: &Sha1) -> Result<()> {
-    let sha = find_object(&repository, reference)?;
+    let sha = resolve_object(&repository, reference)?;
     create_reference(&repository, Path::new("tags").join(name), &sha)?;
     Ok(())
 }
 
 /// Create a full-fledged tag object
 pub fn create_tag_object(repository: &GitRepository, name: &str, reference: &Sha1) -> Result<()> {
-    let sha = find_object(&repository, reference)?;
+    let sha = resolve_object(&repository, reference)?;
 
     // TODO this does not make a lot of sense...
     let tag_data = format!("object {}
@@ -204,16 +205,19 @@ This is the message and should have come from the user", sha, name);;
     Ok(())
 }
 
-//////////// search //////////////
+//////////// object search //////////////
 
-pub fn find_object_of_type(repository: &GitRepository, sha: &Sha1, fmt: &str, follow: bool) -> Result<Sha1> {
-    let sha = resolve_object(repository, sha)?;
+/// Find the full hash of a Git object given its type and identifier, recursively
+/// following links found in `Tag` and `Commit` objects.
+///
+/// > NOTE: An object identifier can be many things in Git, but we restrict ourselves
+/// > to (short and long) hashes and references.
+pub fn recursively_resolve_object_by_type(repository: &GitRepository, identifier: &str, fmt: &str) -> Result<Sha1> {
+    let sha = resolve_object(repository, identifier)?;
 
     let object = GitObject::read(repository, &sha)?;
     if object.get_fmt() == fmt.as_bytes() {
         return Ok(sha);
-    } else if !follow {
-        return Err(format!("{} does not have type {}", sha, fmt));
     }
 
     let parsed_element = match object {
@@ -239,120 +243,52 @@ pub fn find_object_of_type(repository: &GitRepository, sha: &Sha1, fmt: &str, fo
     let sha = from_utf8(&parsed_element)
         .map_err(|_| format!("Sections of {} do not contain valid UTF-8", sha))?;
 
-    find_object_of_type(repository, &sha.to_string(), fmt, true)
+    recursively_resolve_object_by_type(repository, &sha.to_string(), fmt)
 }
 
-fn find_object(repository: &GitRepository, sha: &Sha1) -> Result<Sha1> {
-    resolve_object(repository, sha)
+/// Find the full hash of a Git object given its type and identifier.
+///
+/// > NOTE: An object identifier can be many things in Git, but we restrict ourselves
+/// > to (short and long) hashes and references.
+fn resolve_object_by_type(repository: &GitRepository, identifier: &str, fmt: &str) -> Result<Sha1> {
+    let sha = resolve_object(repository, identifier)?;
+
+    let object = GitObject::read(repository, &sha)?;
+    if object.get_fmt() == fmt.as_bytes() {
+        Ok(sha)
+    } else {
+        Err(format!("{} does not have type {}", sha, fmt))
+    }
 }
 
-fn resolve_object(repository: &GitRepository, name: &str) -> Result<Sha1> {
+/// Find the full hash of a Git object given its identifier.
+///
+/// > NOTE: An object identifier can be many things in Git, but we restrict ourselves
+/// > to (short and long) hashes and references.
+fn resolve_object(repository: &GitRepository, identifier: &str) -> Result<Sha1> {
     lazy_static! {
         static ref HASH_RE: Regex = Regex::new(r"^[0-9A-Fa-f]{4,40}$")
             .expect("Cannot compile HASH_RE regex");
     }
 
-    if name == "HEAD" {
-        return resolve_reference(repository, name);
-    }
-
-    if HASH_RE.is_match(name) {
-        if name.len() == 40 {
-            return Ok(name.to_lowercase());
+    if HASH_RE.is_match(identifier) {
+        if identifier.len() == 40 {
+            return Ok(identifier.to_lowercase());
         }
-        let name = name.to_lowercase();
-        let paths = read_directory_content(repository.gitdir().join("objects").join(&name[..2]))
-            .map_err(|_| format!("{} is not a valid short hash", name));
-        let candidates: Vec<String> = paths?.iter()
-            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(&name[2..]))
-            .map(|p| name[..2].to_string() + p.file_name().unwrap().to_string_lossy().as_ref()).collect();
-        if candidates.len() == 1 {
-            return Ok(candidates[0].clone());
-        } else if candidates.len() > 1 {
-            return Err(format!("Found {} candidates for {}", candidates.len(), name));
-        }
-    }
-    Err(format!("{} cannot be resolved to a hash", name))
-}
-
-//////////// references //////////////
-
-// A reference is either
-// - indirect: a path to a file prepended by 'ref:',
-// - direct: the hash of a Git Object
-//
-// Examples of references are branches and lightweight tags.
-// Also, note that HEAD is always an indirect reference to a branch, unless
-// Git is in detached HEAD state, in which case it is a direct reference to a commit
-
-fn list_references<P: AsRef<Path>>(repository: &GitRepository, custom_full_path: Option<P>) -> Result<LinkedHashMap<PathBuf, Sha1>> {
-    let path = if let Some(p) = custom_full_path {
-        p.as_ref().to_path_buf()
-    } else {
-        repository.gitdir().join("refs")
-    };
-
-    let mut results = LinkedHashMap::new();
-    let mut directory_content = read_directory_content(path)?;
-    directory_content.sort_unstable();
-    for entry in directory_content {
-        if entry.is_dir() {
-            for nested_reference in list_references(repository, Some(entry))? {
-                results.insert(nested_reference.0, nested_reference.1);
+        let identifier = identifier.to_lowercase();
+        let paths = read_directory_content(repository.gitdir().join("objects").join(&identifier[..2]));
+        if paths.is_ok() {
+            let candidates: Vec<String> = paths.unwrap().iter()
+                .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(&identifier[2..]))
+                .map(|p| identifier[..2].to_string() + p.file_name().unwrap().to_string_lossy().as_ref())
+                .collect();
+            if candidates.len() == 1 {
+                return Ok(candidates[0].clone());
+            } else if candidates.len() > 1 {
+                return Err(format!("Found {} candidates for {}", candidates.len(), identifier));
             }
-        } else {
-            let reference = resolve_reference(repository, &entry)?;
-            results.insert(entry, reference);
         }
     }
-    Ok(results)
-}
 
-fn resolve_reference<P: AsRef<Path>>(repository: &GitRepository, reference: P) -> Result<Sha1> {
-    let path = repository.gitdir().join(&reference);
-    let data = read_file_content(path)?;
-    let reference_value = from_utf8(&data)
-        .map_err(|_| format!("The reference {:?} does not contain valid UTF-8", reference.as_ref()))?;
-    let reference_prefix = "ref: ";
-    if reference_value.starts_with(reference_prefix) {
-        resolve_reference(repository, reference_value[reference_prefix.len()..].trim())
-    } else {
-        Ok(reference_value.to_string())
-    }
-}
-
-fn create_reference<P: AsRef<Path>>(repository: &GitRepository, reference: P, sha: &Sha1) -> Result<()> {
-    let path = repository.gitdir().join("refs").join(reference);
-    let mut file = create_file(&path)?;
-    let mut sha = sha.clone();
-    sha.push('\n');
-    file.write_all(sha.as_bytes())
-        .map_err(|_| format!("Cannot write to reference file {:?}", path))?;
-    Ok(())
-}
-
-/// Recursively look for a `.git` directory in the current directory
-/// or in one of its parents.
-pub fn find_repository<P: AsRef<Path>>(path: P) -> Option<Result<GitRepository>> {
-    for ancestor in path.as_ref().ancestors() {
-        debug!("Checking {:?}", ancestor);
-        if ancestor.join(GIT_PRIVATE_FOLDER).is_dir() {
-            debug!("Found .git in {:?}", ancestor);
-            return Some(GitRepository::read(ancestor));
-        }
-    }
-    None
-}
-
-#[test]
-fn test_find_repository() {
-    let path = Path::new("/home/user/bad/path");
-    let repo = find_repository(path);
-    assert!(repo.is_none());
-}
-
-/// Recursively look for a `.git` directory in the current directory
-/// or in one of its parents. If it does not one, raise an error.
-pub fn find_repository_required<P: AsRef<Path>>(path: P) -> Result<GitRepository> {
-    find_repository(&path).ok_or(format!("Repository not found in {:?}", path.as_ref()))?
+    resolve_reference(repository, identifier)
 }

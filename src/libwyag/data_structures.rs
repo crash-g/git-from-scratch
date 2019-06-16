@@ -15,6 +15,7 @@ use flate2::{
     write::{ZlibEncoder},
 };
 
+use log::debug;
 use linked_hash_map::LinkedHashMap;
 use ini::Ini;
 
@@ -146,6 +147,25 @@ impl GitRepository {
             .map_err(|_| "Cannot write to config file".to_string())?;
 
         Ok(GitRepository{worktree: path.to_path_buf(), gitdir, conf})
+    }
+
+    /// Recursively look for a `.git` directory in the current directory
+    /// or in one of its parents.
+    pub fn find_repository<P: AsRef<Path>>(path: P) -> Option<Result<GitRepository>> {
+        for ancestor in path.as_ref().ancestors() {
+            debug!("Checking directory {:?}", ancestor);
+            if ancestor.join(GIT_PRIVATE_FOLDER).is_dir() {
+                debug!("Found .git in {:?}", ancestor);
+                return Some(GitRepository::read(ancestor));
+            }
+        }
+        None
+    }
+
+    /// Recursively look for a `.git` directory in the current directory
+    /// or in one of its parents. If one is not found, raise an error.
+    pub fn find_repository_required<P: AsRef<Path>>(path: P) -> Result<GitRepository> {
+        GitRepository::find_repository(&path).ok_or(format!("Repository not found in {:?}", path.as_ref()))?
     }
 
     /// Generate a minimal repository configuration.
@@ -472,22 +492,29 @@ impl GitTreeLeaf {
 mod tests {
     use super::*;
 
-    fn test_init_repository(path: &str) -> GitRepository {
-        test_delete_all(path);
-        GitRepository::create(path).unwrap()
-    }
-
-    fn test_delete_all(path: &str) {
+    fn delete_all(path: &str) {
         let base_path = Path::new(path);
         if base_path.exists() {
             std::fs::remove_dir_all(base_path).unwrap();
         }
     }
 
+    fn init_repository(path: &str) -> GitRepository {
+        delete_all(path);
+        GitRepository::create(path).unwrap()
+    }
+
+    #[test]
+    fn test_find_repository() {
+        let path = Path::new("/home/user/bad/path");
+        let repo = GitRepository::find_repository(path);
+        assert!(repo.is_none());
+    }
+
     #[test]
     fn test_blob_write_read() {
         let test_path = "/tmp/rust/git/test/blob";
-        let repository = test_init_repository(test_path);
+        let repository = init_repository(test_path);
         let git_blob = GitObject::new_blob(b"100".to_vec());
 
         let sha = git_blob.write(&repository).unwrap();
@@ -498,7 +525,7 @@ mod tests {
             Blob{data} => assert_eq!(b"100".to_vec(), data),
             _ => assert!(false)
         }
-        test_delete_all(test_path);
+        delete_all(test_path);
     }
 
     #[test]
