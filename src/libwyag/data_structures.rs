@@ -184,12 +184,12 @@ impl GitRepository {
 }
 
 impl GitObject {
-    const BLOB_FMT: &'static [u8] = b"blob";
-    const COMMIT_FMT: &'static [u8] = b"commit";
-    const TREE_FMT: &'static [u8] = b"tree";
-    const TAG_FMT: &'static [u8] = b"tag";
+    const BLOB_FMT: &'static str = "blob";
+    const COMMIT_FMT: &'static str = "commit";
+    const TREE_FMT: &'static str = "tree";
+    const TAG_FMT: &'static str = "tag";
 
-    pub fn new(fmt: &[u8], data: &[u8]) -> Result<GitObject> {
+    pub fn new(fmt: &str, data: &[u8]) -> Result<GitObject> {
         if fmt == GitObject::BLOB_FMT {
             Ok(GitObject::new_blob(data.to_vec()))
         } else if fmt == GitObject::COMMIT_FMT {
@@ -199,8 +199,7 @@ impl GitObject {
         } else if fmt == GitObject::TAG_FMT {
             GitObject::new_tag(data)
         } else {
-            Err(format!("The format {} is not supported",
-                        from_utf8(fmt).expect("fmt should be UTF-8")))
+            Err(format!("The format {} is not supported", fmt))
         }
     }
 
@@ -234,7 +233,7 @@ impl GitObject {
     }
 
     /// Get the type of the object.
-    pub fn get_fmt(&self) -> &'static [u8] {
+    pub fn get_fmt(&self) -> &'static str {
         use GitObject::*;
         match self {
             Blob{..} => GitObject::BLOB_FMT,
@@ -257,11 +256,12 @@ impl GitObject {
 
         match (space_position, null_position) {
             (Some(sp), Some(np)) if np > sp => {
-                let fmt = &contents[0..sp];
+                let fmt = from_utf8(&contents[0..sp])
+                    .map_err(|_| "The object format must be valid UTF-8".to_string())?;
                 let size: usize = from_utf8(&contents[sp+1..np])
-                    .map_err(|_| "UTF-8 required".to_string())?
+                    .map_err(|_| "The object size must be valid UTF-8".to_string())?
                     .parse()
-                    .map_err(|_| "Size must be an integer".to_string())?;
+                    .map_err(|_| "The object size must be an integer".to_string())?;
                 if size != contents.len() - np - 1 {
                     Err(format!("The size of the object differs from the declared size, which is {}", size))
                 } else {
@@ -299,7 +299,7 @@ impl GitObject {
     fn get_hash_and_content(&self) -> (Sha1, Vec<u8>) {
         let data = self.serialize();
 
-        let mut result = self.get_fmt().to_vec();
+        let mut result = self.get_fmt().as_bytes().to_vec();
         result.extend_from_slice(b" ");
         result.extend_from_slice(data.len().to_string().as_bytes());
         result.extend_from_slice(b"\x00");

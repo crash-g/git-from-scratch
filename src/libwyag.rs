@@ -46,7 +46,7 @@ pub fn cat_file(repository: &GitRepository, fmt: &str, sha: &Sha1) -> Result<Vec
 pub fn hash_object<P: AsRef<Path>>(file_path: P, fmt: &str, actually_write: bool) -> Result<Sha1> {
     let repository = GitRepository::find_repository_required(&file_path)?;
     let data = read_file_content(repository.gitdir().join(file_path))?;
-    let object = GitObject::new(fmt.as_bytes(), &data)?;
+    let object = GitObject::new(fmt, &data)?;
     if actually_write {
         object.write(&repository)
     } else {
@@ -92,7 +92,7 @@ fn make_graphviz_string(repository: &GitRepository, sha: &Sha1, seen: &mut HashS
 
 //////////// ls-tree //////////////
 
-/// Format leaves of a tree in a human-readable form.
+/// Read leaves of a tree and format them in a human-readable form.
 pub fn ls_tree(repository: &GitRepository, identifier: &str) -> Result<String> {
     let sha = resolve_identifier(&repository, &identifier)?;
     let tree = GitObject::read(&repository, &sha)?;
@@ -102,7 +102,6 @@ pub fn ls_tree(repository: &GitRepository, identifier: &str) -> Result<String> {
             let mut result = String::new();
             for leaf in data.get_leaves() {
                 let fmt = GitObject::read(repository, leaf.sha())?.get_fmt();
-                let fmt = from_utf8(fmt).expect(&format!("fmt should be utf8: {:?}", fmt));
                 result += &format!("{} {} {}\t{}",
                                    leaf.mode(),
                                    fmt,
@@ -178,7 +177,7 @@ fn checkout_tree_impl<P: AsRef<Path>>(
 
 //////////// show references //////////////
 
-/// Format references at the given path in a human-readable form.
+/// Read references at the given path and format them in a human-readable form.
 pub fn show_references<P: AsRef<Path>>(
     repository: &GitRepository, custom_full_path: Option<P>
 ) -> Result<String> {
@@ -229,7 +228,7 @@ pub fn recursively_resolve_identifier_by_type(repository: &GitRepository, identi
     let sha = resolve_identifier(repository, identifier)?;
 
     let object = GitObject::read(repository, &sha)?;
-    if object.get_fmt() == fmt.as_bytes() {
+    if object.get_fmt() == fmt {
         return Ok(sha);
     }
 
@@ -267,7 +266,7 @@ fn resolve_identifier_by_type(repository: &GitRepository, identifier: &str, fmt:
     let sha = resolve_identifier(repository, identifier)?;
 
     let object = GitObject::read(repository, &sha)?;
-    if object.get_fmt() == fmt.as_bytes() {
+    if object.get_fmt() == fmt {
         Ok(sha)
     } else {
         Err(format!("{} does not have type {}", sha, fmt))
