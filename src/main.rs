@@ -188,7 +188,7 @@ fn show_references() -> Result<()> {
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
     let repository = libwyag::GitRepository::find_repository_required(current_directory)?;
-    libwyag::show_references::<PathBuf>(&repository, None)?;
+    println!("{}", libwyag::show_references::<&str>(&repository, None)?);
     Ok(())
 }
 
@@ -197,7 +197,8 @@ fn list_tags() -> Result<()> {
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
     let repository = libwyag::GitRepository::find_repository_required(current_directory)?;
-    libwyag::show_references(&repository, Some(repository.gitdir().join("refs").join("tags")))?;
+    let path = repository.gitdir().join("refs").join("tags");
+    println!("{}", libwyag::show_references(&repository, Some(path))?);
     Ok(())
 }
 
@@ -210,7 +211,7 @@ fn add_tag(name: String, object: Option<libwyag::Sha1>, add_tag_object: bool) ->
     if add_tag_object {
         libwyag::create_tag_object(&repository, &name, &object.expect("An object is required at the moment (TODO)"))
     } else {
-        libwyag::create_tag(&repository, &name, &object.expect("An object is required at the moment (TODO)"))
+        libwyag::create_lightweight_tag(&repository, &name, &object.expect("An object is required at the moment (TODO)"))
     }
 }
 
@@ -219,7 +220,7 @@ fn rev_parse(name: String, fmt: String) -> Result<()> {
     let current_directory = std::env::current_dir()
         .map_err(|_| "Cannot determine current directory".to_string())?;
     let repository = libwyag::GitRepository::find_repository_required(current_directory)?;
-    let sha = libwyag::recursively_resolve_object_by_type(&repository, &name, &fmt)?;
+    let sha = libwyag::recursively_resolve_identifier_by_type(&repository, &name, &fmt)?;
     println!("The complete hash associated to {} is {}", name, sha);
     Ok(())
 }

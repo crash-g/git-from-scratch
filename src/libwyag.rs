@@ -38,7 +38,7 @@ pub fn init<P: AsRef<Path>>(path: P) -> Result<()> {
 }
 
 pub fn cat_file(repository: &GitRepository, fmt: &str, sha: &Sha1) -> Result<Vec<u8>> {
-    let sha = resolve_object_by_type(&repository, &sha, fmt)?;
+    let sha = resolve_identifier_by_type(&repository, &sha, fmt)?;
     let git_object = GitObject::read(&repository, &sha)?;
     Ok(git_object.serialize())
 }
@@ -92,8 +92,9 @@ fn make_graphviz_string(repository: &GitRepository, sha: &Sha1, seen: &mut HashS
 
 //////////// ls-tree //////////////
 
-pub fn ls_tree(repository: &GitRepository, sha: &Sha1) -> Result<String> {
-    let sha = resolve_object(&repository, &sha)?;
+/// Format leaves of a tree in a human-readable form.
+pub fn ls_tree(repository: &GitRepository, identifier: &str) -> Result<String> {
+    let sha = resolve_identifier(&repository, &identifier)?;
     let tree = GitObject::read(&repository, &sha)?;
 
     match tree {
@@ -116,8 +117,11 @@ pub fn ls_tree(repository: &GitRepository, sha: &Sha1) -> Result<String> {
 
 //////////// checkout tree //////////////
 
-pub fn checkout_tree<P: AsRef<Path>>(repository: &GitRepository, sha: &Sha1, path: P) -> Result<()> {
-    let sha = resolve_object(&repository, &sha)?;
+/// Checkout a tree with the given identifier at the given `path`.
+///
+/// To make things simpler, if the `path` exists must be the path of an empty directory.
+pub fn checkout_tree<P: AsRef<Path>>(repository: &GitRepository, identifier: &str, path: P) -> Result<()> {
+    let sha = resolve_identifier(&repository, &identifier)?;
     let object = GitObject::read(&repository, &sha)?;
 
     let tree = match object {
@@ -145,9 +149,13 @@ pub fn checkout_tree<P: AsRef<Path>>(repository: &GitRepository, sha: &Sha1, pat
     checkout_tree_impl(&repository, &tree, path)
 }
 
-fn checkout_tree_impl<P: AsRef<Path>>(repository: &GitRepository,
-                                      tree: &Tree,
-                                      path: P) -> Result<()> {
+/// In this simplified version of Git, checking out a tree means creating
+/// a file for every `Blob` object and a directory
+/// for every `Tree`, then descending recursively in these directories.
+fn checkout_tree_impl<P: AsRef<Path>>(
+    repository: &GitRepository, tree: &Tree, path: P
+) -> Result<()> {
+
     for leaf in tree.get_leaves() {
         let object = GitObject::read(&repository, &leaf.sha())?;
         let dest = path.as_ref().join(&leaf.path());
@@ -162,7 +170,7 @@ fn checkout_tree_impl<P: AsRef<Path>>(repository: &GitRepository,
                 file.write_all(&data)
                     .map_err(|_| format!("Cannot write to file {:?}", dest))?;
             },
-            _ => return Err("This tree contains an object which is neither a tree or a blob".to_string()),
+            _ => return Err("This tree contains an object which is neither a tree nor a blob".to_string()),
         }
     }
     Ok(())
@@ -170,26 +178,31 @@ fn checkout_tree_impl<P: AsRef<Path>>(repository: &GitRepository,
 
 //////////// show references //////////////
 
-pub fn show_references<P: AsRef<Path>>(repository: &GitRepository, custom_full_path: Option<P>) -> Result<()> {
+/// Format references at the given path in a human-readable form.
+pub fn show_references<P: AsRef<Path>>(
+    repository: &GitRepository, custom_full_path: Option<P>
+) -> Result<String> {
+
+    let mut result = "References:\n".to_string();
     let references = list_references(&repository, custom_full_path)?;
     for (path, hash) in references {
-        println!("{:?} -> {}", path, hash); // TODO
+        result += &format!("{:?} -> {}\n", path, hash);
     }
-    Ok(())
+    Ok(result)
 }
 
 //////////// tag //////////////
 
-/// Create a "lightweight" reference to a commit, tree or blob
-pub fn create_tag(repository: &GitRepository, name: &str, reference: &Sha1) -> Result<()> {
-    let sha = resolve_object(&repository, reference)?;
+/// Create a "lightweight" tag, which is a reference to a commit, tree or blob.
+pub fn create_lightweight_tag(repository: &GitRepository, name: &str, identifier: &str) -> Result<()> {
+    let sha = resolve_identifier(&repository, identifier)?;
     create_reference(&repository, Path::new("tags").join(name), &sha)?;
     Ok(())
 }
 
-/// Create a full-fledged tag object
-pub fn create_tag_object(repository: &GitRepository, name: &str, reference: &Sha1) -> Result<()> {
-    let sha = resolve_object(&repository, reference)?;
+/// Create a full-fledged tag object.
+pub fn create_tag_object(repository: &GitRepository, name: &str, identifier: &str) -> Result<()> {
+    let sha = resolve_identifier(&repository, identifier)?;
 
     // TODO this does not make a lot of sense...
     let tag_data = format!("object {}
@@ -205,15 +218,15 @@ This is the message and should have come from the user", sha, name);;
     Ok(())
 }
 
-//////////// object search //////////////
+//////////// object identifier resolution //////////////
 
 /// Find the full hash of a Git object given its type and identifier, recursively
 /// following links found in `Tag` and `Commit` objects.
 ///
 /// > NOTE: An object identifier can be many things in Git, but we restrict ourselves
 /// > to (short and long) hashes and references.
-pub fn recursively_resolve_object_by_type(repository: &GitRepository, identifier: &str, fmt: &str) -> Result<Sha1> {
-    let sha = resolve_object(repository, identifier)?;
+pub fn recursively_resolve_identifier_by_type(repository: &GitRepository, identifier: &str, fmt: &str) -> Result<Sha1> {
+    let sha = resolve_identifier(repository, identifier)?;
 
     let object = GitObject::read(repository, &sha)?;
     if object.get_fmt() == fmt.as_bytes() {
@@ -243,15 +256,15 @@ pub fn recursively_resolve_object_by_type(repository: &GitRepository, identifier
     let sha = from_utf8(&parsed_element)
         .map_err(|_| format!("Sections of {} do not contain valid UTF-8", sha))?;
 
-    recursively_resolve_object_by_type(repository, &sha.to_string(), fmt)
+    recursively_resolve_identifier_by_type(repository, &sha.to_string(), fmt)
 }
 
 /// Find the full hash of a Git object given its type and identifier.
 ///
 /// > NOTE: An object identifier can be many things in Git, but we restrict ourselves
 /// > to (short and long) hashes and references.
-fn resolve_object_by_type(repository: &GitRepository, identifier: &str, fmt: &str) -> Result<Sha1> {
-    let sha = resolve_object(repository, identifier)?;
+fn resolve_identifier_by_type(repository: &GitRepository, identifier: &str, fmt: &str) -> Result<Sha1> {
+    let sha = resolve_identifier(repository, identifier)?;
 
     let object = GitObject::read(repository, &sha)?;
     if object.get_fmt() == fmt.as_bytes() {
@@ -265,7 +278,7 @@ fn resolve_object_by_type(repository: &GitRepository, identifier: &str, fmt: &st
 ///
 /// > NOTE: An object identifier can be many things in Git, but we restrict ourselves
 /// > to (short and long) hashes and references.
-fn resolve_object(repository: &GitRepository, identifier: &str) -> Result<Sha1> {
+fn resolve_identifier(repository: &GitRepository, identifier: &str) -> Result<Sha1> {
     lazy_static! {
         static ref HASH_RE: Regex = Regex::new(r"^[0-9A-Fa-f]{4,40}$")
             .expect("Cannot compile HASH_RE regex");
