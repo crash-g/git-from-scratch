@@ -4,6 +4,8 @@
 //! - indirect: a path to a file prepended by 'ref:',
 //! - direct: the hash of a Git Object
 //!
+//! All references live in the `refs` subdirectory of `.git`.
+//!
 //! Examples of references are branches and lightweight tags.
 //! Also, note that HEAD is always an indirect reference to a branch, unless
 //! Git is in detached HEAD state, in which case it is a direct reference to a commit
@@ -61,7 +63,7 @@ pub fn resolve_reference<P: AsRef<Path>>(repository: &GitRepository, reference: 
     if reference_value.starts_with(REFERENCE_PREFIX) {
         resolve_reference(repository, reference_value[REFERENCE_PREFIX.len()..].trim())
     } else {
-        Ok(reference_value.to_string())
+        Ok(reference_value.trim().to_string())
     }
 }
 

@@ -3,6 +3,10 @@
 //! Git handles objects and references. For a description of the
 //! objects, see the module `data_structures`. For a description of
 //! references see the module `references`.
+//!
+//! Many methods expect an object *identifier*. An object identifier
+//! can be many things in Git, but we restrict ourselves
+//! to (short and long) hashes and references.
 
 use std::{
     str::from_utf8,
@@ -17,9 +21,6 @@ use regex::Regex;
 
 pub type Result<T> = std::result::Result<T, String>;
 pub type Sha1 = String;
-
-const CONFIG_INI: &str = "config";
-const GIT_PRIVATE_FOLDER: &str = ".git";
 
 mod utils;
 use utils::*;
@@ -37,12 +38,17 @@ pub fn init<P: AsRef<Path>>(path: P) -> Result<()> {
     Ok(())
 }
 
-pub fn cat_file(repository: &GitRepository, fmt: &str, sha: &Sha1) -> Result<Vec<u8>> {
-    let sha = resolve_identifier_by_type(&repository, &sha, fmt)?;
+/// Get the serialization of a Git object by type.
+pub fn cat_file(repository: &GitRepository, fmt: &str, identifier: &str) -> Result<Vec<u8>> {
+    let sha = resolve_identifier_by_type(&repository, &identifier, fmt)?;
     let git_object = GitObject::read(&repository, &sha)?;
     Ok(git_object.serialize())
 }
 
+/// Get the Git hash of a file at the given `file_path`.
+///
+/// If `actually_write` is `true`, write the object in the repository.
+/// > NOTE: The file must be in a Git repository.
 pub fn hash_object<P: AsRef<Path>>(file_path: P, fmt: &str, actually_write: bool) -> Result<Sha1> {
     let repository = GitRepository::find_repository_required(&file_path)?;
     let data = read_file_content(repository.gitdir().join(file_path))?;
@@ -54,15 +60,20 @@ pub fn hash_object<P: AsRef<Path>>(file_path: P, fmt: &str, actually_write: bool
     }
 }
 
-pub fn log<P: AsRef<Path>>(file_path: P, sha: &Sha1) -> Result<String> {
-    let repository = GitRepository::find_repository_required(&file_path)?;
+/// Very simplified version of `git log`. It produces a string with the
+/// dot representation of the log.
+///
+/// It requires the `identifier` of a `Commit` object to work.
+pub fn log(repository: &GitRepository, identifier: &str) -> Result<String> {
+    let sha = resolve_identifier(repository, identifier)?;
     let mut result = "digraph wyaglog{".to_string();
     let mut seen = HashSet::new();
-    result += &make_graphviz_string(&repository, sha, &mut seen)?;
+    result += &make_graphviz_string(&repository, &sha, &mut seen)?;
     result += "}";
     Ok(result)
 }
 
+/// Recursively follow the `parent` field of each commit and add it to the result.
 fn make_graphviz_string(repository: &GitRepository, sha: &Sha1, seen: &mut HashSet<Sha1>) -> Result<String> {
     if !seen.insert(sha.to_string()) {
         return Ok("".to_string());
@@ -77,7 +88,7 @@ fn make_graphviz_string(repository: &GitRepository, sha: &Sha1, seen: &mut HashS
                     let mut result = String::new();
                     for p in parents {
                         let p = from_utf8(p)
-                            .map_err(|_| "Parent must be valid UTF-8".to_string())?
+                            .map_err(|_| "The parent field must be valid UTF-8".to_string())?
                             .to_string();
                         result += &format!("c_{} -> c_{};", sha, p);
                         result += &make_graphviz_string(repository, &p, seen)?;
@@ -89,8 +100,6 @@ fn make_graphviz_string(repository: &GitRepository, sha: &Sha1, seen: &mut HashS
         _ => Err(format!("The hash {} is not relative to a commit", sha))
     }
 }
-
-//////////// ls-tree //////////////
 
 /// Read leaves of a tree and format them in a human-readable form.
 pub fn ls_tree(repository: &GitRepository, identifier: &str) -> Result<String> {
@@ -114,9 +123,10 @@ pub fn ls_tree(repository: &GitRepository, identifier: &str) -> Result<String> {
     }
 }
 
-//////////// checkout tree //////////////
-
-/// Checkout a tree with the given identifier at the given `path`.
+/// Checkout a tree at the given `path`.
+///
+/// The `identifier` must be of a `Tree` or of a `Commit`: in the latter
+/// case, the `tree` field is considered.
 ///
 /// To make things simpler, if the `path` exists must be the path of an empty directory.
 pub fn checkout_tree<P: AsRef<Path>>(repository: &GitRepository, identifier: &str, path: P) -> Result<()> {
@@ -175,8 +185,6 @@ fn checkout_tree_impl<P: AsRef<Path>>(
     Ok(())
 }
 
-//////////// show references //////////////
-
 /// Read references at the given path and format them in a human-readable form.
 pub fn show_references<P: AsRef<Path>>(
     repository: &GitRepository, custom_full_path: Option<P>
@@ -190,16 +198,16 @@ pub fn show_references<P: AsRef<Path>>(
     Ok(result)
 }
 
-//////////// tag //////////////
-
-/// Create a "lightweight" tag, which is a reference to a commit, tree or blob.
+/// Create a "lightweight" tag with the given `name`,
+/// pointing to an object with the given `identifier`.
 pub fn create_lightweight_tag(repository: &GitRepository, name: &str, identifier: &str) -> Result<()> {
     let sha = resolve_identifier(&repository, identifier)?;
     create_reference(&repository, Path::new("tags").join(name), &sha)?;
     Ok(())
 }
 
-/// Create a full-fledged tag object.
+/// Create a full-fledged tag object with the given `name`,
+/// pointing to an object with the given `identifier`.
 pub fn create_tag_object(repository: &GitRepository, name: &str, identifier: &str) -> Result<()> {
     let sha = resolve_identifier(&repository, identifier)?;
 
@@ -219,11 +227,8 @@ This is the message and should have come from the user", sha, name);;
 
 //////////// object identifier resolution //////////////
 
-/// Find the full hash of a Git object given its type and identifier, recursively
+/// Find the full hash of a Git object given its type, recursively
 /// following links found in `Tag` and `Commit` objects.
-///
-/// > NOTE: An object identifier can be many things in Git, but we restrict ourselves
-/// > to (short and long) hashes and references.
 pub fn recursively_resolve_identifier_by_type(repository: &GitRepository, identifier: &str, fmt: &str) -> Result<Sha1> {
     let sha = resolve_identifier(repository, identifier)?;
 
@@ -258,10 +263,7 @@ pub fn recursively_resolve_identifier_by_type(repository: &GitRepository, identi
     recursively_resolve_identifier_by_type(repository, &sha.to_string(), fmt)
 }
 
-/// Find the full hash of a Git object given its type and identifier.
-///
-/// > NOTE: An object identifier can be many things in Git, but we restrict ourselves
-/// > to (short and long) hashes and references.
+/// Find the full hash of a Git object given its type.
 fn resolve_identifier_by_type(repository: &GitRepository, identifier: &str, fmt: &str) -> Result<Sha1> {
     let sha = resolve_identifier(repository, identifier)?;
 
@@ -273,10 +275,7 @@ fn resolve_identifier_by_type(repository: &GitRepository, identifier: &str, fmt:
     }
 }
 
-/// Find the full hash of a Git object given its identifier.
-///
-/// > NOTE: An object identifier can be many things in Git, but we restrict ourselves
-/// > to (short and long) hashes and references.
+/// Find the full hash of a Git object.
 fn resolve_identifier(repository: &GitRepository, identifier: &str) -> Result<Sha1> {
     lazy_static! {
         static ref HASH_RE: Regex = Regex::new(r"^[0-9A-Fa-f]{4,40}$")

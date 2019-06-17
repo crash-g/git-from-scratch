@@ -21,9 +21,14 @@ use ini::Ini;
 
 use super::{
     Result, Sha1,
-    CONFIG_INI, GIT_PRIVATE_FOLDER,
     utils::*,
 };
+
+/// The name of the configuration file in `GIT_PRIVATE_DIRECTORY`.
+const CONFIG_INI: &str = "config";
+
+/// The name of the directory where Git keeps its files.
+const GIT_PRIVATE_DIRECTORY: &str = ".git";
 
 /// The metadata associated to a repository.
 pub struct GitRepository {
@@ -39,7 +44,8 @@ pub struct GitRepository {
 
 /// An object in the Git model.
 ///
-/// Objects can be serialized and deserialized, and the serialization
+/// Objects live in the `objects` subdirectory in `.git`,
+/// they can be serialized and deserialized, and the serialization
 /// can be written to file, following some internal logic (see
 /// [get_hash_and_content](#method.get_hash_and_content)).
 ///
@@ -57,6 +63,9 @@ pub enum GitObject {
     },
 
     /// `Tree`s represent the content of the work tree.
+    ///
+    /// `Commit`s may have a `tree` field with the hash of a `Tree`,
+    /// which represents the state of the repository when the commit was created.
     Tree {
         data: Tree,
     },
@@ -97,7 +106,7 @@ impl GitRepository {
     /// Read repository metadata from the given directory path.
     pub fn read<P: AsRef<Path>>(path: P) -> Result<Self> {
         let worktree = path.as_ref().to_path_buf();
-        let gitdir = path.as_ref().join(GIT_PRIVATE_FOLDER);
+        let gitdir = path.as_ref().join(GIT_PRIVATE_DIRECTORY);
 
         if !gitdir.is_dir() {
             return Err(format!("Not a Git repository: {:?}", gitdir));
@@ -126,7 +135,7 @@ impl GitRepository {
         create_directory(&path)?;
         check_is_empty(&path)?;
 
-        let gitdir = path.join(GIT_PRIVATE_FOLDER);
+        let gitdir = path.join(GIT_PRIVATE_DIRECTORY);
 
         create_directory(gitdir.join("branches"))?;
         create_directory(gitdir.join("objects"))?;
@@ -154,7 +163,7 @@ impl GitRepository {
     pub fn find_repository<P: AsRef<Path>>(path: P) -> Option<Result<GitRepository>> {
         for ancestor in path.as_ref().ancestors() {
             debug!("Checking directory {:?}", ancestor);
-            if ancestor.join(GIT_PRIVATE_FOLDER).is_dir() {
+            if ancestor.join(GIT_PRIVATE_DIRECTORY).is_dir() {
                 debug!("Found .git in {:?}", ancestor);
                 return Some(GitRepository::read(ancestor));
             }
